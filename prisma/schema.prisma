@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("POSTGRES_PRISMA_URL") // uses connection pooling
+  directUrl = env("POSTGRES_URL_NON_POOLING") // uses a direct connection
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  tokenBalance Int        @default(100000) // 100k free tokens on signup
+  plan         Plan       @default(FREE)
+  isBanned     Boolean    @default(false)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  identities   Identity[]
+  usageLogs    UsageLog[]
+}
+
+model Identity {
+  id         String   @id @default(uuid())
+  userId     String
+  provider   String   // e.g., 'yandex', 'vk'
+  providerId String   // External ID from the provider
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+}
+
+model UsageLog {
+  id               String   @id @default(uuid())
+  userId           String
+  model            String
+  promptTokens     Int
+  completionTokens Int
+  createdAt        DateTime @default(now())
+
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+enum Plan {
+  FREE
+  PRO
+}
