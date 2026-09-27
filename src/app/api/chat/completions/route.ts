@@ -2,6 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { decryptJWT } from '@/lib/jwt';
 import prisma from '@/lib/prisma';
 
+// Шаги агента на бесплатных моделях в сутки на пользователя. Один шаг —
+// один запрос модели; задача вроде «Змейки» занимает 10–30 шагов. Лимит
+// бережёт общую дневную квоту OpenRouter на :free-модели от одного человека.
+const FREE_DAILY_STEP_LIMIT = 150;
+
+/** Начало текущих суток UTC: в это время обнуляется и квота OpenRouter на :free. */
+function startOfUtcDay(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+}
+
 export async function POST(req: NextRequest) {
   try {
     // 1. Авторизация
@@ -27,12 +37,39 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
-    if (user.tokenBalance <= 0 && user.plan === 'FREE') {
+    if (user.isBanned) {
+      return NextResponse.json({ error: 'Account is blocked' }, { status: 403 });
+    }
+
+    // OpenRouter's :free variants do not spend Arni's paid-model allowance.
+    const body = await req.json();
+    const isFreeModel = typeof body.model === 'string' && body.model.endsWith(':free');
+
+    if (!isFreeModel && user.tokenBalance <= 0 && user.plan === 'FREE') {
       return NextResponse.json({ error: 'Insufficient tokens' }, { status: 402 });
     }
 
+    if (isFreeModel) {
+      const now = new Date();
+      const dayStart = startOfUtcDay(now);
+      const stepsToday = await prisma.usageLog.count({
+        where: { userId: user.id, model: { endsWith: ':free' }, createdAt: { gte: dayStart } },
+      });
+      if (stepsToday >= FREE_DAILY_STEP_LIMIT) {
+        const resetAt = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+        return NextResponse.json({
+          error: {
+            code: 'free_daily_limit',
+            message: `Дневной лимит бесплатных запросов исчерпан (${FREE_DAILY_STEP_LIMIT} шагов агента). Он обновится в ${resetAt.toISOString().slice(11, 16)} UTC.`,
+          },
+        }, {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil((resetAt.getTime() - now.getTime()) / 1000)) },
+        });
+      }
+    }
+
     // 3. Подготовка запроса для OpenRouter
-    const body = await req.json();
     
     // Включаем встроенный подсчет токенов для стриминга (OpenAI совместимый параметр)
     if (body.stream && !body.stream_options) {
@@ -63,6 +100,7 @@ export async function POST(req: NextRequest) {
 
     // 5. Обработка стриминга и перехват использования токенов
     if (body.stream) {
+      let usageRecorded = false;
       const transformStream = new TransformStream({
         async transform(chunk, controller) {
           const text = new TextDecoder().decode(chunk);
@@ -75,24 +113,27 @@ export async function POST(req: NextRequest) {
               for (const line of lines) {
                 if (line.startsWith('data: ') && line !== 'data: [DONE]') {
                   const data = JSON.parse(line.slice(6));
-                  if (data.usage && data.usage.total_tokens) {
+                  if (!usageRecorded && data.usage && data.usage.total_tokens) {
                     const promptTokens = data.usage.prompt_tokens || 0;
                     const completionTokens = data.usage.completion_tokens || 0;
-                    
-                    // Асинхронно списываем токены в БД
-                    prisma.user.update({
-                      where: { id: user.id },
-                      data: { tokenBalance: { decrement: promptTokens + completionTokens } },
-                    }).catch(console.error);
 
-                    prisma.usageLog.create({
-                      data: {
-                        userId: user.id,
-                        model: body.model || 'unknown',
-                        promptTokens,
-                        completionTokens,
-                      }
-                    }).catch(console.error);
+                    // Записываем списание и историю вместе до завершения потока.
+                    if (!isFreeModel) {
+                      await prisma.$transaction([
+                        prisma.user.update({
+                          where: { id: user.id },
+                          data: { tokenBalance: { decrement: promptTokens + completionTokens } },
+                        }),
+                        prisma.usageLog.create({
+                          data: { userId: user.id, model: body.model || 'unknown', promptTokens, completionTokens },
+                        }),
+                      ]);
+                    } else {
+                      await prisma.usageLog.create({
+                        data: { userId: user.id, model: body.model || 'unknown', promptTokens, completionTokens },
+                      });
+                    }
+                    usageRecorded = true;
                   }
                 }
               }
@@ -121,19 +162,18 @@ export async function POST(req: NextRequest) {
       const promptTokens = json.usage.prompt_tokens || 0;
       const completionTokens = json.usage.completion_tokens || 0;
       
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { tokenBalance: { decrement: promptTokens + completionTokens } },
-      });
-
-      await prisma.usageLog.create({
-        data: {
-          userId: user.id,
-          model: body.model || 'unknown',
-          promptTokens,
-          completionTokens,
-        }
-      });
+      const usageData = { userId: user.id, model: body.model || 'unknown', promptTokens, completionTokens };
+      if (isFreeModel) {
+        await prisma.usageLog.create({ data: usageData });
+      } else {
+        await prisma.$transaction([
+          prisma.user.update({
+            where: { id: user.id },
+            data: { tokenBalance: { decrement: promptTokens + completionTokens } },
+          }),
+          prisma.usageLog.create({ data: usageData }),
+        ]);
+      }
     }
 
     return NextResponse.json(json);

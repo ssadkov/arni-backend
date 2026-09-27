@@ -80,6 +80,54 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ token: sessionJwt, user: { email: user.email, plan: user.plan, balance: user.tokenBalance } });
     }
 
+    if (provider === 'vk') {
+      const clientId = process.env.VK_CLIENT_ID?.trim() || '54785916';
+      const vkRes = await fetch('https://id.vk.ru/oauth2/user_info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ client_id: clientId, access_token: token }),
+      });
+
+      if (!vkRes.ok) {
+        return NextResponse.json({ error: 'Invalid VK token' }, { status: 401 });
+      }
+
+      const vkProfile = await vkRes.json();
+      if (vkProfile.error) {
+        return NextResponse.json({ error: 'Invalid VK token' }, { status: 401 });
+      }
+
+      const vkUser = vkProfile.user ?? vkProfile.response?.user ?? vkProfile;
+      const providerId = String(vkUser.user_id ?? vkUser.id ?? '');
+      const email = typeof vkUser.email === 'string' ? vkUser.email.trim().toLowerCase() : '';
+      if (!providerId) {
+        return NextResponse.json({ error: 'Incomplete user data from VK' }, { status: 400 });
+      }
+
+      const existingIdentity = await prisma.identity.findUnique({
+        where: { provider_providerId: { provider: 'vk', providerId } },
+        include: { user: true },
+      });
+      let user = existingIdentity?.user;
+      if (!user) {
+        const userEmail = email || `vk-${providerId}@accounts.arni.invalid`;
+        const matchingUser = await prisma.user.upsert({
+          where: { email: userEmail },
+          update: {},
+          create: { email: userEmail },
+        });
+        const identity = await prisma.identity.upsert({
+          where: { provider_providerId: { provider: 'vk', providerId } },
+          update: {},
+          create: { userId: matchingUser.id, provider: 'vk', providerId },
+          include: { user: true },
+        });
+        user = identity.user;
+      }
+
+      const sessionJwt = await encryptJWT({ userId: user.id, email: user.email, plan: user.plan });
+      return NextResponse.json({ token: sessionJwt, user: { email: user.email, plan: user.plan, balance: user.tokenBalance } });
+    }
     return NextResponse.json({ error: 'Unsupported provider' }, { status: 400 });
   } catch (error) {
     console.error('Auth Exchange Error:', error);

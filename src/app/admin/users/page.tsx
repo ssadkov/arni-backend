@@ -1,4 +1,5 @@
 import prisma from '@/lib/prisma';
+import UserActions from './UserActions';
 
 export const dynamic = 'force-dynamic';
 
@@ -80,8 +81,7 @@ export default async function UsersPage() {
                   </span>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                  <button className="text-indigo-600 hover:text-indigo-900 mr-3">Начислить</button>
-                  <button className="text-red-600 hover:text-red-900">Забанить</button>
+                  <UserActions userId={user.id} isBanned={user.isBanned} />
                 </td>
               </tr>
             ))}

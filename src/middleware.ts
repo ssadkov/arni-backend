@@ -29,5 +29,5 @@ export function middleware(req: NextRequest) {
 
 // Указываем Next.js, для каких путей запускать этот middleware
 export const config = {
-  matcher: ['/admin/:path*'],
+  matcher: ['/admin/:path*', '/api/admin/:path*'],
 };
