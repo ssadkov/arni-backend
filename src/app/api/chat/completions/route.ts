@@ -45,8 +45,21 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const isFreeModel = typeof body.model === 'string' && body.model.endsWith(':free');
 
-    if (!isFreeModel && user.tokenBalance <= 0 && user.plan === 'FREE') {
-      return NextResponse.json({ error: 'Insufficient tokens' }, { status: 402 });
+    // Платные модели — только в тарифе Pro. Пока его нет, клиент предлагает
+    // записаться в лист ожидания (POST /api/waitlist).
+    if (!isFreeModel && user.plan !== 'PRO') {
+      return NextResponse.json({
+        error: {
+          code: 'pro_required',
+          message: 'Эта модель будет доступна в тарифе Pro. Выберите бесплатную модель или нажмите «Сообщить о запуске», чтобы узнать, когда Pro откроется.',
+        },
+      }, { status: 402 });
+    }
+
+    if (!isFreeModel && user.tokenBalance <= 0) {
+      return NextResponse.json({
+        error: { code: 'insufficient_tokens', message: 'На балансе закончились токены для платных моделей.' },
+      }, { status: 402 });
     }
 
     if (isFreeModel) {

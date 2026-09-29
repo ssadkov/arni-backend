@@ -5,6 +5,12 @@ import { NextResponse } from 'next/server';
 // Список публичный и нужен до входа, так что авторизация не требуется.
 const OPENROUTER_MODELS_URL = 'https://openrouter.ai/api/v1/models?supported_parameters=tools';
 
+// В первой версии платные модели доступны только в тарифе Pro, а его ещё нет:
+// в выбор попадают только бесплатные варианты OpenRouter (`:free`).
+function isFreeModel(model: { id?: unknown }): boolean {
+  return typeof model.id === 'string' && model.id.endsWith(':free');
+}
+
 export async function GET() {
   try {
     const response = await fetch(OPENROUTER_MODELS_URL, {
@@ -20,8 +26,9 @@ export async function GET() {
       return NextResponse.json({ error: 'Failed to load models' }, { status: 502 });
     }
 
-    const body = await response.text();
-    return new NextResponse(body, {
+    const catalog = await response.json();
+    const models = Array.isArray(catalog?.data) ? catalog.data.filter(isFreeModel) : [];
+    return new NextResponse(JSON.stringify({ ...catalog, data: models }), {
       status: 200,
       headers: {
         'Content-Type': 'application/json',
