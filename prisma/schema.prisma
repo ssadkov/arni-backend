@@ -47,6 +47,14 @@ model UsageLog {
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
+// Лист ожидания Pro с лендинга: человек ещё не пользователь, есть только контакт.
+model WaitlistEntry {
+  id        String   @id @default(uuid())
+  contact   String   @unique // почта или Telegram
+  source    String   @default("landing")
+  createdAt DateTime @default(now())
+}
+
 enum Plan {
   FREE
   PRO

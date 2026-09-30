@@ -16,6 +16,9 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
           <Link href="/admin/users" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
             👥 Пользователи
           </Link>
+          <Link href="/admin/waitlist" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
+            ⏳ Лист ожидания Pro
+          </Link>
           <Link href="/admin/settings" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
             ⚙️ Настройки
           </Link>

@@ -10,7 +10,8 @@ export default async function AdminDashboard() {
 
   try {
     userCount = await prisma.user.count();
-    waitlistCount = await prisma.user.count({ where: { proWaitlistAt: { not: null } } });
+    waitlistCount = await prisma.user.count({ where: { proWaitlistAt: { not: null } } })
+      + await prisma.waitlistEntry.count();
     const logs = await prisma.usageLog.aggregate({
       _sum: {
         promptTokens: true,
