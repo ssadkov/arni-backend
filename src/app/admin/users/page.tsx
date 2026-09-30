@@ -79,6 +79,12 @@ export default async function UsersPage() {
                   <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${user.plan === 'PRO' ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-800'}`}>
                     {user.plan}
                   </span>
+                  {user.proWaitlistAt && (
+                    <div className="text-xs text-purple-700 mt-1" title={user.proWaitlistContact ?? undefined}>
+                      Ждёт Pro с {new Date(user.proWaitlistAt).toLocaleDateString('ru-RU')}
+                      {user.proWaitlistContact ? ` · ${user.proWaitlistContact}` : ''}
+                    </div>
+                  )}
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                   <UserActions userId={user.id} isBanned={user.isBanned} />

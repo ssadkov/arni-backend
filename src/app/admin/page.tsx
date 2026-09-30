@@ -5,10 +5,12 @@ export const dynamic = 'force-dynamic';
 export default async function AdminDashboard() {
   let userCount = 0;
   let totalTokens = 0;
+  let waitlistCount = 0;
   let dbError = false;
 
   try {
     userCount = await prisma.user.count();
+    waitlistCount = await prisma.user.count({ where: { proWaitlistAt: { not: null } } });
     const logs = await prisma.usageLog.aggregate({
       _sum: {
         promptTokens: true,
@@ -33,6 +35,7 @@ export default async function AdminDashboard() {
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
           <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Всего пользователей</h3>
           <p className="mt-2 text-3xl font-bold text-gray-900">{userCount}</p>
+          <p className="text-xs text-gray-400 mt-1">Ждут тариф Pro: {waitlistCount}</p>
         </div>
         
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">

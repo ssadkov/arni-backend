@@ -14,6 +14,9 @@ model User {
   tokenBalance Int        @default(100000) // 100k free tokens on signup
   plan         Plan       @default(FREE)
   isBanned     Boolean    @default(false)
+  // Лист ожидания платного тарифа: когда нажал «Сообщить о запуске» и куда писать.
+  proWaitlistAt      DateTime?
+  proWaitlistContact String?
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
