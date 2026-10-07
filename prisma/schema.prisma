@@ -12,6 +12,11 @@ model User {
   id           String     @id @default(uuid())
   email        String     @unique
   tokenBalance Int        @default(100000) // 100k free tokens on signup
+  // Дневная квота шагов на моделях :free. freeStepsDay — сутки UTC (YYYY-MM-DD),
+  // к которым относится freeStepsToday. freeStepsTotal не сбрасывается.
+  freeStepsToday Int       @default(0)
+  freeStepsDay   String?
+  freeStepsTotal Int       @default(0)
   plan         Plan       @default(FREE)
   isBanned     Boolean    @default(false)
   // Лист ожидания платного тарифа: когда нажал «Сообщить о запуске» и куда писать.

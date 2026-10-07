@@ -1,18 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { decryptJWT } from '@/lib/jwt';
 import prisma from '@/lib/prisma';
+import {
+  FREE_DAILY_STEP_LIMIT,
+  freeStepHeaders,
+  freeStepSnapshot,
+  releaseFreeStep,
+  reserveFreeStep,
+  type FreeStepSnapshot,
+} from '@/lib/freeSteps';
 
-// Шаги агента на бесплатных моделях в сутки на пользователя. Один шаг —
-// один запрос модели; задача вроде «Змейки» занимает 10–30 шагов. Лимит
-// бережёт общую дневную квоту OpenRouter на :free-модели от одного человека.
-const FREE_DAILY_STEP_LIMIT = 150;
-
-/** Начало текущих суток UTC: в это время обнуляется и квота OpenRouter на :free. */
-function startOfUtcDay(now: Date): Date {
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+function freeLimitResponse(snapshot: FreeStepSnapshot) {
+  return NextResponse.json({
+    error: {
+      code: 'free_daily_limit',
+      message: `Дневной лимит бесплатных запросов исчерпан (${FREE_DAILY_STEP_LIMIT} шагов агента). Он обновится в ${snapshot.resetsAt.slice(11, 16)} UTC.`,
+      freeSteps: snapshot,
+    },
+  }, {
+    status: 429,
+    headers: {
+      ...freeStepHeaders(snapshot),
+      'Retry-After': String(Math.max(1, Math.ceil((Date.parse(snapshot.resetsAt) - Date.now()) / 1000))),
+    },
+  });
 }
 
 export async function POST(req: NextRequest) {
+  let reservedUserId: string | null = null;
   try {
     // 1. Авторизация
     const authHeader = req.headers.get('Authorization');
@@ -62,24 +77,14 @@ export async function POST(req: NextRequest) {
       }, { status: 402 });
     }
 
+    let freeSteps: FreeStepSnapshot | null = null;
     if (isFreeModel) {
-      const now = new Date();
-      const dayStart = startOfUtcDay(now);
-      const stepsToday = await prisma.usageLog.count({
-        where: { userId: user.id, model: { endsWith: ':free' }, createdAt: { gte: dayStart } },
-      });
-      if (stepsToday >= FREE_DAILY_STEP_LIMIT) {
-        const resetAt = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
-        return NextResponse.json({
-          error: {
-            code: 'free_daily_limit',
-            message: `Дневной лимит бесплатных запросов исчерпан (${FREE_DAILY_STEP_LIMIT} шагов агента). Он обновится в ${resetAt.toISOString().slice(11, 16)} UTC.`,
-          },
-        }, {
-          status: 429,
-          headers: { 'Retry-After': String(Math.ceil((resetAt.getTime() - now.getTime()) / 1000)) },
-        });
+      freeSteps = await reserveFreeStep(user.id);
+      if (!freeSteps) {
+        const fresh = await prisma.user.findUnique({ where: { id: user.id } });
+        return freeLimitResponse(freeStepSnapshot(fresh ?? user));
       }
+      reservedUserId = user.id;
     }
 
     // 3. Подготовка запроса для OpenRouter
@@ -91,6 +96,10 @@ export async function POST(req: NextRequest) {
 
     const openRouterApiKey = process.env.OPENROUTER_API_KEY;
     if (!openRouterApiKey) {
+      if (reservedUserId) {
+        await releaseFreeStep(reservedUserId);
+        reservedUserId = null;
+      }
       return NextResponse.json({ error: 'OpenRouter API Key not configured' }, { status: 500 });
     }
 
@@ -108,8 +117,18 @@ export async function POST(req: NextRequest) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      return new NextResponse(errorText, { status: response.status });
+      if (reservedUserId) {
+        freeSteps = await releaseFreeStep(reservedUserId);
+        reservedUserId = null;
+      }
+      return new NextResponse(errorText, {
+        status: response.status,
+        headers: freeSteps ? freeStepHeaders(freeSteps) : undefined,
+      });
     }
+
+    // Шаг уже зарезервирован: ответ OpenRouter принят, даже если поток оборвётся.
+    reservedUserId = null;
 
     // 5. Обработка стриминга и перехват использования токенов
     if (body.stream) {
@@ -165,6 +184,7 @@ export async function POST(req: NextRequest) {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
+          ...(freeSteps ? freeStepHeaders(freeSteps) : {}),
         },
       });
     }
@@ -189,9 +209,18 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return NextResponse.json(json);
+    return NextResponse.json(json, {
+      headers: freeSteps ? freeStepHeaders(freeSteps) : undefined,
+    });
 
   } catch (error) {
+    if (reservedUserId) {
+      try {
+        await releaseFreeStep(reservedUserId);
+      } catch (releaseError) {
+        console.error('Failed to release free step:', releaseError);
+      }
+    }
     console.error('Chat completions error:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }

@@ -1,4 +1,5 @@
 import prisma from '@/lib/prisma';
+import { freeStepSnapshot } from '@/lib/freeSteps';
 import UserActions from './UserActions';
 
 export const dynamic = 'force-dynamic';
@@ -38,6 +39,7 @@ export default async function UsersPage() {
               <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Пользователь</th>
               <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Провайдеры</th>
               <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Баланс токенов</th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Бесплатные шаги</th>
               <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Тариф</th>
               <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
             </tr>
@@ -45,12 +47,14 @@ export default async function UsersPage() {
           <tbody className="bg-white divide-y divide-gray-200">
             {users.length === 0 && !dbError && (
               <tr>
-                <td colSpan={5} className="px-6 py-8 text-center text-gray-500">
+                <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
                   Пользователей пока нет.
                 </td>
               </tr>
             )}
-            {users.map((user) => (
+            {users.map((user) => {
+              const steps = freeStepSnapshot(user);
+              return (
               <tr key={user.id} className="hover:bg-gray-50">
                 <td className="px-6 py-4 whitespace-nowrap">
                   <div className="flex items-center">
@@ -76,6 +80,10 @@ export default async function UsersPage() {
                   <div className="text-sm text-gray-900 font-mono">{user.tokenBalance.toLocaleString('ru-RU')}</div>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
+                  <div className="text-sm text-gray-900 font-mono">{steps.used} / {steps.limit}</div>
+                  <div className="text-xs text-gray-500">сегодня · всего {steps.total.toLocaleString('ru-RU')}</div>
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap">
                   <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${user.plan === 'PRO' ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-800'}`}>
                     {user.plan}
                   </span>
@@ -90,7 +98,8 @@ export default async function UsersPage() {
                   <UserActions userId={user.id} isBanned={user.isBanned} />
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

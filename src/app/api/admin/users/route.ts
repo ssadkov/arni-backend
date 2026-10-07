@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/adminAuth';
 import prisma from '@/lib/prisma';
+import { freeStepSnapshot } from '@/lib/freeSteps';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,6 +23,7 @@ export async function GET(req: NextRequest) {
 			tokenBalance: user.tokenBalance,
 			plan: user.plan,
 			isBanned: user.isBanned,
+			freeSteps: freeStepSnapshot(user),
 			identities: user.identities.map((identity) => ({
 				provider: identity.provider,
 				providerId: identity.providerId,
