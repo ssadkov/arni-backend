@@ -10,6 +10,8 @@
         "postinstall": "prisma generate"
     },
     "dependencies": {
+        "@aws-sdk/client-bedrock": "^3.1147.0",
+        "@aws-sdk/client-bedrock-runtime": "^3.1147.0",
         "@prisma/client": "^5.22.0",
         "@vercel/analytics": "^2.0.1",
         "@vercel/postgres": "^0.10.0",

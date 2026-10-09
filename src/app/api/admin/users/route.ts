@@ -23,6 +23,7 @@ export async function GET(req: NextRequest) {
 			tokenBalance: user.tokenBalance,
 			plan: user.plan,
 			isBanned: user.isBanned,
+			llmProvider: user.llmProvider,
 			freeSteps: freeStepSnapshot(user),
 			identities: user.identities.map((identity) => ({
 				provider: identity.provider,

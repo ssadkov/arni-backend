@@ -19,6 +19,10 @@ model User {
   freeStepsTotal Int       @default(0)
   plan         Plan       @default(FREE)
   isBanned     Boolean    @default(false)
+  // null — брать LLM_PROVIDER из окружения. Иначе персональный провайдер модели.
+  llmProvider  LlmProvider?
+  // Какой профиль Bedrock вызывать, если пользователю доступно несколько.
+  bedrockModelId String?
   // Лист ожидания платного тарифа: когда нажал «Сообщить о запуске» и куда писать.
   proWaitlistAt      DateTime?
   proWaitlistContact String?
@@ -27,6 +31,7 @@ model User {
 
   identities   Identity[]
   usageLogs    UsageLog[]
+  modelAccess  UserModelAccess[]
 }
 
 model Identity {
@@ -47,9 +52,37 @@ model UsageLog {
   model            String
   promptTokens     Int
   completionTokens Int
+  // bedrock или openrouter. Старые строки без источника узнаём по id модели.
+  source           String?
   createdAt        DateTime @default(now())
 
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Каталог Bedrock. enabled — доступна ли модель всем, у кого нет личного исключения.
+model BedrockModel {
+  id                   String   @id
+  name                 String
+  inputPerMillion      Float?
+  outputPerMillion     Float?
+  enabled              Boolean  @default(false)
+  agreementStatus      String?
+  authorizationStatus  String?
+  regionAvailability   String?
+  updatedAt            DateTime @updatedAt
+
+  grants               UserModelAccess[]
+}
+
+// Личное исключение. enabled=true открывает модель даже если она выключена для всех.
+model UserModelAccess {
+  userId   String
+  modelId  String
+  enabled  Boolean
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model    BedrockModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@id([userId, modelId])
 }
 
 // Лист ожидания Pro с лендинга: человек ещё не пользователь, есть только контакт.
@@ -63,5 +96,10 @@ model WaitlistEntry {
 enum Plan {
   FREE
   PRO
+}
+
+enum LlmProvider {
+  OPENROUTER
+  BEDROCK
 }
 

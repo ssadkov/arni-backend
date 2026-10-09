@@ -9,6 +9,10 @@ import {
   reserveFreeStep,
   type FreeStepSnapshot,
 } from '@/lib/freeSteps';
+import { completeWithBedrock } from '@/lib/llm/bedrock';
+import { modelIdForUser } from '@/lib/llm/bedrockAccess';
+import { completeWithOpenRouter } from '@/lib/llm/openrouter';
+import { resolveLlmProvider } from '@/lib/llm/provider';
 
 function freeLimitResponse(snapshot: FreeStepSnapshot) {
   return NextResponse.json({
@@ -57,12 +61,14 @@ export async function POST(req: NextRequest) {
     }
 
     // OpenRouter's :free variants do not spend Arni's paid-model allowance.
+    // Bedrock подменяет модель на inference profile Claude и не тратит квоту :free.
     const body = await req.json();
-    const isFreeModel = typeof body.model === 'string' && body.model.endsWith(':free');
+    const provider = resolveLlmProvider(user.llmProvider);
+    const isFreeModel = provider === 'openrouter' && typeof body.model === 'string' && body.model.endsWith(':free');
 
-    // Платные модели — только в тарифе Pro. Пока его нет, клиент предлагает
+    // Платные модели OpenRouter — только в тарифе Pro. Пока его нет, клиент предлагает
     // записаться в лист ожидания (POST /api/waitlist).
-    if (!isFreeModel && user.plan !== 'PRO') {
+    if (provider === 'openrouter' && !isFreeModel && user.plan !== 'PRO') {
       return NextResponse.json({
         error: {
           code: 'pro_required',
@@ -71,10 +77,27 @@ export async function POST(req: NextRequest) {
       }, { status: 402 });
     }
 
-    if (!isFreeModel && user.tokenBalance <= 0) {
+    if (provider === 'openrouter' && !isFreeModel && user.tokenBalance <= 0) {
       return NextResponse.json({
         error: { code: 'insufficient_tokens', message: 'На балансе закончились токены для платных моделей.' },
       }, { status: 402 });
+    }
+
+    if (provider === 'bedrock' && user.tokenBalance <= 0) {
+      return NextResponse.json({
+        error: { code: 'insufficient_tokens', message: 'На балансе закончились токены для Claude через Bedrock.' },
+      }, { status: 402 });
+    }
+
+    let forcedBedrockModel: string | undefined;
+    if (provider === 'bedrock' && await prisma.bedrockModel.count() > 0) {
+      const allowed = await modelIdForUser(user.id, user.bedrockModelId);
+      if (!allowed) {
+        return NextResponse.json({
+          error: { code: 'model_disabled', message: 'Для этого аккаунта не включена ни одна модель Bedrock.' },
+        }, { status: 403 });
+      }
+      forcedBedrockModel = allowed;
     }
 
     let freeSteps: FreeStepSnapshot | null = null;
@@ -94,26 +117,11 @@ export async function POST(req: NextRequest) {
       body.stream_options = { include_usage: true };
     }
 
-    const openRouterApiKey = process.env.OPENROUTER_API_KEY;
-    if (!openRouterApiKey) {
-      if (reservedUserId) {
-        await releaseFreeStep(reservedUserId);
-        reservedUserId = null;
-      }
-      return NextResponse.json({ error: 'OpenRouter API Key not configured' }, { status: 500 });
-    }
-
-    // 4. Проксирование запроса
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${openRouterApiKey}`,
-        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'https://arni-code.com',
-        'X-Title': 'Arni Code IDE',
-      },
-      body: JSON.stringify(body),
-    });
+    // 4. Выбранный провайдер. Ответ всегда в формате OpenAI, чтобы редактор не менялся.
+    const response = provider === 'bedrock'
+      ? await completeWithBedrock(body, forcedBedrockModel)
+      : await completeWithOpenRouter(body);
+    const servedModel = response.headers.get('X-Llm-Model') || body.model || 'unknown';
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -157,12 +165,12 @@ export async function POST(req: NextRequest) {
                           data: { tokenBalance: { decrement: promptTokens + completionTokens } },
                         }),
                         prisma.usageLog.create({
-                          data: { userId: user.id, model: body.model || 'unknown', promptTokens, completionTokens },
+                          data: { userId: user.id, model: servedModel, promptTokens, completionTokens, source: provider },
                         }),
                       ]);
                     } else {
                       await prisma.usageLog.create({
-                        data: { userId: user.id, model: body.model || 'unknown', promptTokens, completionTokens },
+                        data: { userId: user.id, model: servedModel, promptTokens, completionTokens, source: provider },
                       });
                     }
                     usageRecorded = true;
@@ -195,7 +203,7 @@ export async function POST(req: NextRequest) {
       const promptTokens = json.usage.prompt_tokens || 0;
       const completionTokens = json.usage.completion_tokens || 0;
       
-      const usageData = { userId: user.id, model: body.model || 'unknown', promptTokens, completionTokens };
+      const usageData = { userId: user.id, model: servedModel, promptTokens, completionTokens, source: provider };
       if (isFreeModel) {
         await prisma.usageLog.create({ data: usageData });
       } else {
