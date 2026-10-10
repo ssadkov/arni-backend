@@ -3,7 +3,7 @@ import { requireAdmin } from '@/lib/adminAuth';
 import prisma from '@/lib/prisma';
 import type { LlmProvider } from '@prisma/client';
 
-const CHOICES = new Set(['default', 'openrouter', 'bedrock']);
+const CHOICES = new Set(['openrouter', 'bedrock']);
 
 export async function POST(
 	req: NextRequest,
@@ -21,11 +21,7 @@ export async function POST(
 		return NextResponse.json({ error: 'Invalid provider' }, { status: 400 });
 	}
 
-	const llmProvider: LlmProvider | null = choice === 'bedrock'
-		? 'BEDROCK'
-		: choice === 'openrouter'
-			? 'OPENROUTER'
-			: null;
+	const llmProvider: LlmProvider = choice === 'bedrock' ? 'BEDROCK' : 'OPENROUTER';
 
 	try {
 		const user = await prisma.user.update({

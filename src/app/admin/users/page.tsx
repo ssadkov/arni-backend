@@ -1,7 +1,6 @@
 import Link from 'next/link';
 import prisma from '@/lib/prisma';
 import { freeStepSnapshot } from '@/lib/freeSteps';
-import { envLlmProvider } from '@/lib/llm/provider';
 import ProviderSelect from './ProviderSelect';
 import UserActions from './UserActions';
 
@@ -106,8 +105,7 @@ export default async function UsersPage() {
                 <td className="px-6 py-4 whitespace-nowrap">
                   <ProviderSelect
                     userId={user.id}
-                    value={user.llmProvider === 'BEDROCK' ? 'bedrock' : user.llmProvider === 'OPENROUTER' ? 'openrouter' : 'default'}
-                    envProvider={envLlmProvider()}
+                    value={user.llmProvider === 'BEDROCK' ? 'bedrock' : 'openrouter'}
                   />
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">

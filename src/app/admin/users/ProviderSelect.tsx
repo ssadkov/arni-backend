@@ -6,11 +6,9 @@ import { useRouter } from 'next/navigation';
 export default function ProviderSelect({
 	userId,
 	value,
-	envProvider,
 }: {
 	userId: string;
-	value: 'default' | 'openrouter' | 'bedrock';
-	envProvider: 'openrouter' | 'bedrock';
+	value: 'openrouter' | 'bedrock';
 }) {
 	const router = useRouter();
 	const [current, setCurrent] = useState(value);
@@ -28,14 +26,12 @@ export default function ProviderSelect({
 				window.alert(await response.text());
 				return;
 			}
-			setCurrent(next as 'default' | 'openrouter' | 'bedrock');
+			setCurrent(next as 'openrouter' | 'bedrock');
 			router.refresh();
 		} finally {
 			setBusy(false);
 		}
 	}
-
-	const envLabel = envProvider === 'bedrock' ? 'Bedrock' : 'OpenRouter';
 
 	return (
 		<select
@@ -44,7 +40,6 @@ export default function ProviderSelect({
 			onChange={(event) => change(event.target.value)}
 			className="block w-full max-w-[11rem] rounded-md border border-gray-300 bg-white py-1.5 pl-2 pr-8 text-sm text-gray-900 disabled:opacity-50"
 		>
-			<option value="default">По умолчанию ({envLabel})</option>
 			<option value="openrouter">OpenRouter</option>
 			<option value="bedrock">Bedrock (Claude)</option>
 		</select>
