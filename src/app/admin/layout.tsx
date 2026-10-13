@@ -19,6 +19,9 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
           <Link href="/admin/models" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
             🧠 Модели Bedrock
           </Link>
+          <Link href="/admin/traffic" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
+            Traffic
+          </Link>
           <Link href="/admin/waitlist" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
             ⏳ Лист ожидания Pro
           </Link>

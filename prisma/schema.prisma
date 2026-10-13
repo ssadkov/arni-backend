@@ -29,9 +29,10 @@ model User {
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
-  identities   Identity[]
-  usageLogs    UsageLog[]
-  modelAccess  UserModelAccess[]
+  identities    Identity[]
+  usageLogs     UsageLog[]
+  modelRequests ModelRequest[]
+  modelAccess   UserModelAccess[]
 }
 
 model Identity {
@@ -44,6 +45,26 @@ model Identity {
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerId])
+}
+
+// One row per chat-completion attempt, including upstream failures.
+// Prompts are not stored.
+model ModelRequest {
+  id         String   @id @default(uuid())
+  userId     String
+  model      String
+  statusCode Int
+  durationMs Int
+  error      String?
+  // Set when a red free model was replaced before this attempt.
+  routedFrom String?
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([model, createdAt])
+  @@index([userId, createdAt])
 }
 
 model UsageLog {
@@ -102,4 +123,3 @@ enum LlmProvider {
   OPENROUTER
   BEDROCK
 }
-

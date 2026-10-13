@@ -13,6 +13,8 @@ import { completeWithBedrock } from '@/lib/llm/bedrock';
 import { modelIdForUser } from '@/lib/llm/bedrockAccess';
 import { completeWithOpenRouter } from '@/lib/llm/openrouter';
 import { resolveLlmProvider } from '@/lib/llm/provider';
+import { recordModelRequest } from '@/lib/modelRequests';
+import { rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
 
 function freeLimitResponse(snapshot: FreeStepSnapshot) {
   return NextResponse.json({
@@ -31,7 +33,24 @@ function freeLimitResponse(snapshot: FreeStepSnapshot) {
 }
 
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
   let reservedUserId: string | null = null;
+  let trackedUserId: string | undefined;
+  let trackedModel = 'unknown';
+  let routedFrom: string | null = null;
+  const track = (statusCode: number, error?: string | null, model = trackedModel) => {
+    if (!trackedUserId) {
+      return Promise.resolve();
+    }
+    return recordModelRequest({
+      userId: trackedUserId,
+      model,
+      statusCode,
+      durationMs: Date.now() - startedAt,
+      error,
+      routedFrom,
+    });
+  };
   try {
     // 1. Авторизация
     const authHeader = req.headers.get('Authorization');
@@ -56,7 +75,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 });
     }
 
+    trackedUserId = user.id;
+
     if (user.isBanned) {
+      await track(403, 'Account is blocked');
       return NextResponse.json({ error: 'Account is blocked' }, { status: 403 });
     }
 
@@ -65,27 +87,34 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const provider = resolveLlmProvider(user.llmProvider);
     const isFreeModel = provider === 'openrouter' && typeof body.model === 'string' && body.model.endsWith(':free');
+    trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
 
     // Платные модели OpenRouter — только в тарифе Pro. Пока его нет, клиент предлагает
     // записаться в лист ожидания (POST /api/waitlist).
     if (provider === 'openrouter' && !isFreeModel && user.plan !== 'PRO') {
+      const message = 'Эта модель будет доступна в тарифе Pro. Выберите бесплатную модель или нажмите «Сообщить о запуске», чтобы узнать, когда Pro откроется.';
+      await track(402, message);
       return NextResponse.json({
         error: {
           code: 'pro_required',
-          message: 'Эта модель будет доступна в тарифе Pro. Выберите бесплатную модель или нажмите «Сообщить о запуске», чтобы узнать, когда Pro откроется.',
+          message,
         },
       }, { status: 402 });
     }
 
     if (provider === 'openrouter' && !isFreeModel && user.tokenBalance <= 0) {
+      const message = 'На балансе закончились токены для платных моделей.';
+      await track(402, message);
       return NextResponse.json({
-        error: { code: 'insufficient_tokens', message: 'На балансе закончились токены для платных моделей.' },
+        error: { code: 'insufficient_tokens', message },
       }, { status: 402 });
     }
 
     if (provider === 'bedrock' && user.tokenBalance <= 0) {
+      const message = 'На балансе закончились токены для Claude через Bedrock.';
+      await track(402, message);
       return NextResponse.json({
-        error: { code: 'insufficient_tokens', message: 'На балансе закончились токены для Claude через Bedrock.' },
+        error: { code: 'insufficient_tokens', message },
       }, { status: 402 });
     }
 
@@ -93,8 +122,10 @@ export async function POST(req: NextRequest) {
     if (provider === 'bedrock' && await prisma.bedrockModel.count() > 0) {
       const allowed = await modelIdForUser(user.id, user.bedrockModelId);
       if (!allowed) {
+        const message = 'Для этого аккаунта не включена ни одна модель Bedrock.';
+        await track(403, message);
         return NextResponse.json({
-          error: { code: 'model_disabled', message: 'Для этого аккаунта не включена ни одна модель Bedrock.' },
+          error: { code: 'model_disabled', message },
         }, { status: 403 });
       }
       forcedBedrockModel = allowed;
@@ -105,6 +136,7 @@ export async function POST(req: NextRequest) {
       freeSteps = await reserveFreeStep(user.id);
       if (!freeSteps) {
         const fresh = await prisma.user.findUnique({ where: { id: user.id } });
+        await track(429, 'free_daily_limit');
         return freeLimitResponse(freeStepSnapshot(fresh ?? user));
       }
       reservedUserId = user.id;
@@ -117,14 +149,52 @@ export async function POST(req: NextRequest) {
       body.stream_options = { include_usage: true };
     }
 
+    // A red :free model is sent to the next green or yellow model in picker order.
+    // Bedrock and paid models are left untouched.
+    if (isFreeModel && typeof body.model === 'string') {
+      const routed = await routeFreeModel(body.model);
+      if (routed.routedFrom) {
+        routedFrom = routed.routedFrom;
+        body.model = routed.model;
+        trackedModel = routed.model;
+      }
+    }
+
     // 4. Выбранный провайдер. Ответ всегда в формате OpenAI, чтобы редактор не менялся.
-    const response = provider === 'bedrock'
+    let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel)
       : await completeWithOpenRouter(body);
-    const servedModel = response.headers.get('X-Llm-Model') || body.model || 'unknown';
+
+    // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
+    // then the next healthy free model is tried once.
+    if (isFreeModel && (response.status === 502 || response.status === 503)) {
+      const failedModel = trackedModel;
+      const errorText = await response.text();
+      await track(response.status, errorText, failedModel);
+      rememberUnavailable(failedModel);
+      const routed = await routeFreeModel(failedModel);
+      if (routed.routedFrom && routed.model !== failedModel) {
+        routedFrom = routed.routedFrom;
+        body.model = routed.model;
+        trackedModel = routed.model;
+        response = await completeWithOpenRouter(body);
+      } else {
+        if (reservedUserId) {
+          freeSteps = await releaseFreeStep(reservedUserId);
+          reservedUserId = null;
+        }
+        return new NextResponse(errorText, {
+          status: response.status,
+          headers: freeSteps ? freeStepHeaders(freeSteps) : undefined,
+        });
+      }
+    }
+
+    const servedModel = response.headers.get('X-Llm-Model') || body.model || trackedModel;
 
     if (!response.ok) {
       const errorText = await response.text();
+      await track(response.status, errorText);
       if (reservedUserId) {
         freeSteps = await releaseFreeStep(reservedUserId);
         reservedUserId = null;
@@ -134,6 +204,8 @@ export async function POST(req: NextRequest) {
         headers: freeSteps ? freeStepHeaders(freeSteps) : undefined,
       });
     }
+
+    await track(response.status, null, servedModel);
 
     // Шаг уже зарезервирован: ответ OpenRouter принят, даже если поток оборвётся.
     reservedUserId = null;
@@ -230,6 +302,7 @@ export async function POST(req: NextRequest) {
       }
     }
     console.error('Chat completions error:', error);
+    await track(500, error instanceof Error ? error.message : 'Internal Server Error');
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
 }
