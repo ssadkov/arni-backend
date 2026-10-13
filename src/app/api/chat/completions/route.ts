@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { decryptJWT } from '@/lib/jwt';
 import prisma from '@/lib/prisma';
+import { recordModelRequest } from '@/lib/modelRequests';
+import { rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
 
 // Шаги агента на бесплатных моделях в сутки на пользователя. Один шаг —
 // один запрос модели; задача вроде «Змейки» занимает 10–30 шагов. Лимит
@@ -13,6 +15,25 @@ function startOfUtcDay(now: Date): Date {
 }
 
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
+  let trackedUserId: string | undefined;
+  let trackedModel = 'unknown';
+  let routedFrom: string | null = null;
+
+  const track = (statusCode: number, error?: string | null) => {
+    if (!trackedUserId) {
+      return Promise.resolve();
+    }
+    return recordModelRequest({
+      userId: trackedUserId,
+      model: trackedModel,
+      statusCode,
+      durationMs: Date.now() - startedAt,
+      error,
+      routedFrom,
+    });
+  };
+
   try {
     // 1. Авторизация
     const authHeader = req.headers.get('Authorization');
@@ -43,22 +64,28 @@ export async function POST(req: NextRequest) {
 
     // OpenRouter's :free variants do not spend Arni's paid-model allowance.
     const body = await req.json();
-    const isFreeModel = typeof body.model === 'string' && body.model.endsWith(':free');
+    trackedUserId = user.id;
+    trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
+    const isFreeModel = trackedModel.endsWith(':free');
 
     // Платные модели — только в тарифе Pro. Пока его нет, клиент предлагает
     // записаться в лист ожидания (POST /api/waitlist).
     if (!isFreeModel && user.plan !== 'PRO') {
+      const message = 'Эта модель будет доступна в тарифе Pro. Выберите бесплатную модель или нажмите «Сообщить о запуске», чтобы узнать, когда Pro откроется.';
+      await track(402, message);
       return NextResponse.json({
         error: {
           code: 'pro_required',
-          message: 'Эта модель будет доступна в тарифе Pro. Выберите бесплатную модель или нажмите «Сообщить о запуске», чтобы узнать, когда Pro откроется.',
+          message,
         },
       }, { status: 402 });
     }
 
     if (!isFreeModel && user.tokenBalance <= 0) {
+      const message = 'На балансе закончились токены для платных моделей.';
+      await track(402, message);
       return NextResponse.json({
-        error: { code: 'insufficient_tokens', message: 'На балансе закончились токены для платных моделей.' },
+        error: { code: 'insufficient_tokens', message },
       }, { status: 402 });
     }
 
@@ -70,10 +97,12 @@ export async function POST(req: NextRequest) {
       });
       if (stepsToday >= FREE_DAILY_STEP_LIMIT) {
         const resetAt = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+        const message = `Дневной лимит бесплатных запросов исчерпан (${FREE_DAILY_STEP_LIMIT} шагов агента). Он обновится в ${resetAt.toISOString().slice(11, 16)} UTC.`;
+        await track(429, message);
         return NextResponse.json({
           error: {
             code: 'free_daily_limit',
-            message: `Дневной лимит бесплатных запросов исчерпан (${FREE_DAILY_STEP_LIMIT} шагов агента). Он обновится в ${resetAt.toISOString().slice(11, 16)} UTC.`,
+            message,
           },
         }, {
           status: 429,
@@ -91,25 +120,61 @@ export async function POST(req: NextRequest) {
 
     const openRouterApiKey = process.env.OPENROUTER_API_KEY;
     if (!openRouterApiKey) {
+      await track(500, 'OpenRouter API Key not configured');
       return NextResponse.json({ error: 'OpenRouter API Key not configured' }, { status: 500 });
     }
 
+    // A red free model is replaced by the next healthy one in the picker order.
+    if (isFreeModel) {
+      const routed = await routeFreeModel(trackedModel);
+      if (routed.routedFrom) {
+        routedFrom = routed.routedFrom;
+        trackedModel = routed.model;
+        body.model = routed.model;
+      }
+    }
+
+    const openRouterHeaders = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${openRouterApiKey}`,
+      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'https://arni-code.com',
+      'X-Title': 'Arni Code IDE',
+    };
+
     // 4. Проксирование запроса
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    let response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${openRouterApiKey}`,
-        'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'https://arni-code.com',
-        'X-Title': 'Arni Code IDE',
-      },
+      headers: openRouterHeaders,
       body: JSON.stringify(body),
     });
 
+    // The status light can be stale. One 503 still moves to the next healthy model.
+    if (!response.ok && (response.status === 502 || response.status === 503) && trackedModel.endsWith(':free')) {
+      const errorText = await response.text();
+      await track(response.status, errorText);
+      rememberUnavailable(trackedModel);
+      const routed = await routeFreeModel(trackedModel);
+      if (routed.routedFrom) {
+        routedFrom = routed.routedFrom;
+        trackedModel = routed.model;
+        body.model = routed.model;
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: openRouterHeaders,
+          body: JSON.stringify(body),
+        });
+      } else {
+        return new NextResponse(errorText, { status: response.status });
+      }
+    }
+
     if (!response.ok) {
       const errorText = await response.text();
+      await track(response.status, errorText);
       return new NextResponse(errorText, { status: response.status });
     }
+
+    await track(response.status);
 
     // 5. Обработка стриминга и перехват использования токенов
     if (body.stream) {
@@ -193,6 +258,7 @@ export async function POST(req: NextRequest) {
 
   } catch (error) {
     console.error('Chat completions error:', error);
+    await track(500, error instanceof Error ? error.message : 'Internal Server Error');
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
 }

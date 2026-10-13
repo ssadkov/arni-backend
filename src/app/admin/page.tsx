@@ -56,12 +56,13 @@ export default async function AdminDashboard() {
       </div>
 
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-gray-800">Последняя активность</h2>
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <h2 className="text-lg font-semibold text-gray-800">Model traffic</h2>
+          <a href="/admin/models" className="text-sm text-indigo-600 hover:text-indigo-800">Open models</a>
         </div>
-        <div className="p-6 text-gray-500 text-center">
-          Здесь будет отображаться график или лог последних запросов
-        </div>
+        <p className="px-6 py-4 text-sm text-gray-500">
+          Failed requests are stored with the model and status. Availability and which models people pick are on the Models page.
+        </p>
       </div>
     </div>
   );

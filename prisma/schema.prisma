@@ -17,11 +17,19 @@ model User {
   // Лист ожидания платного тарифа: когда нажал «Сообщить о запуске» и куда писать.
   proWaitlistAt      DateTime?
   proWaitlistContact String?
+  // Daily free-step counter already stored in production. freeStepsDay is the UTC day key.
+  freeStepsDay       String?
+  freeStepsToday     Int          @default(0)
+  freeStepsTotal     Int          @default(0)
+  llmProvider        LlmProvider?
+  bedrockModelId     String?
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
-  identities   Identity[]
-  usageLogs    UsageLog[]
+  identities    Identity[]
+  usageLogs     UsageLog[]
+  modelRequests ModelRequest[]
+  modelAccess   UserModelAccess[]
 }
 
 model Identity {
@@ -36,12 +44,33 @@ model Identity {
   @@unique([provider, providerId])
 }
 
+// One row per chat-completion attempt, including upstream failures.
+// Prompts are not stored.
+model ModelRequest {
+  id         String   @id @default(uuid())
+  userId     String
+  model      String
+  statusCode Int
+  durationMs Int
+  error      String?
+  // Set when a red free model was replaced before this attempt.
+  routedFrom String?
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([model, createdAt])
+  @@index([userId, createdAt])
+}
+
 model UsageLog {
   id               String   @id @default(uuid())
   userId           String
   model            String
   promptTokens     Int
   completionTokens Int
+  source           String?
   createdAt        DateTime @default(now())
 
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -58,5 +87,35 @@ model WaitlistEntry {
 enum Plan {
   FREE
   PRO
+}
+
+enum LlmProvider {
+  OPENROUTER
+  BEDROCK
+}
+
+model BedrockModel {
+  id                  String   @id
+  name                String
+  inputPerMillion     Float?
+  outputPerMillion    Float?
+  enabled             Boolean  @default(false)
+  agreementStatus     String?
+  authorizationStatus String?
+  regionAvailability  String?
+  updatedAt           DateTime @updatedAt
+
+  access              UserModelAccess[]
+}
+
+model UserModelAccess {
+  userId  String
+  modelId String
+  enabled Boolean
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model   BedrockModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@id([userId, modelId])
 }
 

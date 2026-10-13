@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { trafficByModel, WATCHED_FREE_MODELS } from '@/lib/openRouterStatus';
 
 // OpenRouter отклоняет запросы из РФ («Access denied by security policy»),
 // поэтому клиент берёт список моделей здесь, а не напрямую с openrouter.ai.
@@ -28,6 +29,13 @@ export async function GET() {
 
     const catalog = await response.json();
     const models = Array.isArray(catalog?.data) ? catalog.data.filter(isFreeModel) : [];
+    const lights = await trafficByModel(WATCHED_FREE_MODELS);
+    for (const model of models) {
+      const light = typeof model.id === 'string' ? lights.get(model.id) : undefined;
+      if (light) {
+        model.arni_traffic = light;
+      }
+    }
     return new NextResponse(JSON.stringify({ ...catalog, data: models }), {
       status: 200,
       headers: {
