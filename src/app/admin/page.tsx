@@ -1,4 +1,5 @@
 import prisma from '@/lib/prisma';
+import { utcDayKey } from '@/lib/freeSteps';
 
 export const dynamic = 'force-dynamic';
 
@@ -6,6 +7,8 @@ export default async function AdminDashboard() {
   let userCount = 0;
   let totalTokens = 0;
   let waitlistCount = 0;
+  let freeStepsToday = 0;
+  let freeStepsTotal = 0;
   let dbError = false;
 
   try {
@@ -19,6 +22,15 @@ export default async function AdminDashboard() {
       }
     });
     totalTokens = (logs._sum.promptTokens || 0) + (logs._sum.completionTokens || 0);
+    const today = await prisma.user.aggregate({
+      where: { freeStepsDay: utcDayKey() },
+      _sum: { freeStepsToday: true },
+    });
+    const lifetime = await prisma.user.aggregate({
+      _sum: { freeStepsTotal: true },
+    });
+    freeStepsToday = today._sum.freeStepsToday || 0;
+    freeStepsTotal = lifetime._sum.freeStepsTotal || 0;
   } catch (error) {
     dbError = true;
   }
@@ -47,6 +59,22 @@ export default async function AdminDashboard() {
         </div>
 
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Бесплатные шаги сегодня</h3>
+          <p className="mt-2 text-3xl font-bold text-gray-900">
+            {freeStepsToday.toLocaleString('ru-RU')}
+          </p>
+          <p className="text-xs text-gray-400 mt-1">Сброс в 00:00 UTC · лимит 150 на пользователя</p>
+        </div>
+
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+          <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Бесплатные шаги всего</h3>
+          <p className="mt-2 text-3xl font-bold text-gray-900">
+            {freeStepsTotal.toLocaleString('ru-RU')}
+          </p>
+          <p className="text-xs text-gray-400 mt-1">По всем пользователям, без сброса</p>
+        </div>
+
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
           <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Затраты (Примерно)</h3>
           <p className="mt-2 text-3xl font-bold text-emerald-600">
             ${(totalTokens / 1_000_000 * 0.5).toFixed(4)}
@@ -58,10 +86,10 @@ export default async function AdminDashboard() {
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-800">Model traffic</h2>
-          <a href="/admin/models" className="text-sm text-indigo-600 hover:text-indigo-800">Open models</a>
+          <a href="/admin/traffic" className="text-sm text-indigo-600 hover:text-indigo-800">Open traffic</a>
         </div>
         <p className="px-6 py-4 text-sm text-gray-500">
-          Failed requests are stored with the model and status. Availability and which models people pick are on the Models page.
+          Failed requests are stored with the model and status. Availability and which models people pick are on the Traffic page.
         </p>
       </div>
     </div>

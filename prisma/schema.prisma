@@ -12,17 +12,20 @@ model User {
   id           String     @id @default(uuid())
   email        String     @unique
   tokenBalance Int        @default(100000) // 100k free tokens on signup
+  // Дневная квота шагов на моделях :free. freeStepsDay — сутки UTC (YYYY-MM-DD),
+  // к которым относится freeStepsToday. freeStepsTotal не сбрасывается.
+  freeStepsToday Int       @default(0)
+  freeStepsDay   String?
+  freeStepsTotal Int       @default(0)
   plan         Plan       @default(FREE)
   isBanned     Boolean    @default(false)
+  // null — брать LLM_PROVIDER из окружения. Иначе персональный провайдер модели.
+  llmProvider  LlmProvider?
+  // Какой профиль Bedrock вызывать, если пользователю доступно несколько.
+  bedrockModelId String?
   // Лист ожидания платного тарифа: когда нажал «Сообщить о запуске» и куда писать.
   proWaitlistAt      DateTime?
   proWaitlistContact String?
-  // Daily free-step counter already stored in production. freeStepsDay is the UTC day key.
-  freeStepsDay       String?
-  freeStepsToday     Int          @default(0)
-  freeStepsTotal     Int          @default(0)
-  llmProvider        LlmProvider?
-  bedrockModelId     String?
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
 
@@ -70,10 +73,37 @@ model UsageLog {
   model            String
   promptTokens     Int
   completionTokens Int
+  // bedrock или openrouter. Старые строки без источника узнаём по id модели.
   source           String?
   createdAt        DateTime @default(now())
 
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Каталог Bedrock. enabled — доступна ли модель всем, у кого нет личного исключения.
+model BedrockModel {
+  id                   String   @id
+  name                 String
+  inputPerMillion      Float?
+  outputPerMillion     Float?
+  enabled              Boolean  @default(false)
+  agreementStatus      String?
+  authorizationStatus  String?
+  regionAvailability   String?
+  updatedAt            DateTime @updatedAt
+
+  grants               UserModelAccess[]
+}
+
+// Личное исключение. enabled=true открывает модель даже если она выключена для всех.
+model UserModelAccess {
+  userId   String
+  modelId  String
+  enabled  Boolean
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model    BedrockModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@id([userId, modelId])
 }
 
 // Лист ожидания Pro с лендинга: человек ещё не пользователь, есть только контакт.
@@ -93,29 +123,3 @@ enum LlmProvider {
   OPENROUTER
   BEDROCK
 }
-
-model BedrockModel {
-  id                  String   @id
-  name                String
-  inputPerMillion     Float?
-  outputPerMillion    Float?
-  enabled             Boolean  @default(false)
-  agreementStatus     String?
-  authorizationStatus String?
-  regionAvailability  String?
-  updatedAt           DateTime @updatedAt
-
-  access              UserModelAccess[]
-}
-
-model UserModelAccess {
-  userId  String
-  modelId String
-  enabled Boolean
-
-  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  model   BedrockModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
-
-  @@id([userId, modelId])
-}
-

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { encryptJWT } from '@/lib/jwt';
+import { accountPayload } from '@/lib/freeSteps';
 
 export async function POST(req: NextRequest) {
   try {
@@ -77,7 +78,7 @@ export async function POST(req: NextRequest) {
         plan: user.plan,
       });
 
-      return NextResponse.json({ token: sessionJwt, user: { email: user.email, plan: user.plan, balance: user.tokenBalance } });
+      return NextResponse.json({ token: sessionJwt, user: accountPayload(user) });
     }
 
     if (provider === 'vk') {
@@ -126,7 +127,7 @@ export async function POST(req: NextRequest) {
       }
 
       const sessionJwt = await encryptJWT({ userId: user.id, email: user.email, plan: user.plan });
-      return NextResponse.json({ token: sessionJwt, user: { email: user.email, plan: user.plan, balance: user.tokenBalance } });
+      return NextResponse.json({ token: sessionJwt, user: accountPayload(user) });
     }
     return NextResponse.json({ error: 'Unsupported provider' }, { status: 400 });
   } catch (error) {

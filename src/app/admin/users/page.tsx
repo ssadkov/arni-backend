@@ -1,4 +1,7 @@
+import Link from 'next/link';
 import prisma from '@/lib/prisma';
+import { freeStepSnapshot } from '@/lib/freeSteps';
+import ProviderSelect from './ProviderSelect';
 import UserActions from './UserActions';
 
 export const dynamic = 'force-dynamic';
@@ -6,12 +9,24 @@ export const dynamic = 'force-dynamic';
 export default async function UsersPage() {
   let users: any[] = [];
   let dbError = false;
+  const spentByUser = new Map<string, number>();
 
   try {
-    users = await prisma.user.findMany({
-      orderBy: { createdAt: 'desc' },
-      include: { identities: true }
-    });
+    const [found, spend] = await Promise.all([
+      prisma.user.findMany({
+        orderBy: { createdAt: 'desc' },
+        include: { identities: true }
+      }),
+      prisma.usageLog.groupBy({
+        by: ['userId'],
+        where: { NOT: { model: { endsWith: ':free' } } },
+        _sum: { promptTokens: true, completionTokens: true },
+      }),
+    ]);
+    users = found;
+    for (const row of spend) {
+      spentByUser.set(row.userId, (row._sum.promptTokens || 0) + (row._sum.completionTokens || 0));
+    }
   } catch (error) {
     dbError = true;
   }
@@ -37,7 +52,9 @@ export default async function UsersPage() {
             <tr>
               <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Пользователь</th>
               <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Провайдеры</th>
-              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Баланс токенов</th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Токены</th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Бесплатные шаги</th>
+              <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Модель</th>
               <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Тариф</th>
               <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
             </tr>
@@ -45,12 +62,15 @@ export default async function UsersPage() {
           <tbody className="bg-white divide-y divide-gray-200">
             {users.length === 0 && !dbError && (
               <tr>
-                <td colSpan={5} className="px-6 py-8 text-center text-gray-500">
+                <td colSpan={7} className="px-6 py-8 text-center text-gray-500">
                   Пользователей пока нет.
                 </td>
               </tr>
             )}
-            {users.map((user) => (
+            {users.map((user) => {
+              const steps = freeStepSnapshot(user);
+              const spent = spentByUser.get(user.id) || 0;
+              return (
               <tr key={user.id} className="hover:bg-gray-50">
                 <td className="px-6 py-4 whitespace-nowrap">
                   <div className="flex items-center">
@@ -73,7 +93,20 @@ export default async function UsersPage() {
                   </div>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="text-sm text-gray-900 font-mono">{user.tokenBalance.toLocaleString('ru-RU')}</div>
+                  <div className="text-sm text-gray-900 font-mono">осталось {user.tokenBalance.toLocaleString('ru-RU')}</div>
+                  <div className="text-xs text-gray-500 font-mono">потрачено {spent.toLocaleString('ru-RU')}</div>
+                  <div className="text-xs text-gray-500 font-mono">выделено {(user.tokenBalance + spent).toLocaleString('ru-RU')}</div>
+                  <Link href={`/admin/users/${user.id}`} className="text-xs text-indigo-600 hover:text-indigo-800">модели</Link>
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap">
+                  <div className="text-sm text-gray-900 font-mono">{steps.used} / {steps.limit}</div>
+                  <div className="text-xs text-gray-500">сегодня · всего {steps.total.toLocaleString('ru-RU')}</div>
+                </td>
+                <td className="px-6 py-4 whitespace-nowrap">
+                  <ProviderSelect
+                    userId={user.id}
+                    value={user.llmProvider === 'BEDROCK' ? 'bedrock' : 'openrouter'}
+                  />
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${user.plan === 'PRO' ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-800'}`}>
@@ -90,7 +123,8 @@ export default async function UsersPage() {
                   <UserActions userId={user.id} isBanned={user.isBanned} />
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
