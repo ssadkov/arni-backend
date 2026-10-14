@@ -1,6 +1,8 @@
 import prisma from '@/lib/prisma';
 import { BudgetError } from './budget';
 import { costMicros } from './budgetPolicy';
+import { screenshotCount, supportsScreenshots } from './llm/vision';
+import { countBedrockInput } from './llm/bedrock';
 
 export type BudgetBody = {
 	model: string; messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>;
@@ -9,18 +11,21 @@ export type BudgetBody = {
 	provider?: { max_price: { prompt: number; completion: number; request: number }; require_parameters: boolean };
 };
 
-/** Internal test supports text and local function tools. Reject billable extra modalities. */
-export function managedBody(body: BudgetBody): BudgetBody {
+/** Allow embedded screenshots for Bedrock; strip unsupported billable request options. */
+export function managedBody(body: BudgetBody, allowImages = false): BudgetBody {
 	const textContent = (content: unknown) => content == null || typeof content === 'string' || (Array.isArray(content)
-		&& content.every(part => part && typeof part === 'object' && part.type === 'text' && typeof part.text === 'string'));
+		&& content.every(part => part && typeof part === 'object' && (part.type === 'text' && typeof part.text === 'string' || allowImages && part.type === 'image_url')));
 	if (!body || typeof body !== 'object' || !Array.isArray(body.messages) || !body.messages.length || body.messages.length > 2000
 		|| body.messages.some(message => !message || !textContent(message.content))
 		|| (body.tools && (!Array.isArray(body.tools) || body.tools.some(tool => tool.type !== 'function')))) {
-		throw new BudgetError('unsupported_request', 'Внутренний тест поддерживает текст и инструменты агента. Изображения и платные серверные инструменты пока недоступны.', 400);
+		throw new BudgetError('unsupported_request', allowImages
+			? 'Поддерживаются текст, PNG/JPEG и инструменты агента. Другие форматы и платные серверные инструменты недоступны.'
+			: 'Для этого провайдера поддерживаются текст и инструменты агента. Для скриншотов выберите Claude через Bedrock.', 400);
 	}
 	const requested = body.max_completion_tokens ?? body.max_tokens ?? 4096;
+	if (allowImages) { screenshotCount(body.messages); }
 	if (!Number.isFinite(requested) || requested < 1) { throw new BudgetError('invalid_output_limit', 'Некорректный лимит ответа.', 400); }
-	const messages = body.messages.map(message => ({ role: message.role, content: Array.isArray(message.content) ? message.content.map(part => part.text).join('\n') : message.content,
+	const messages = body.messages.map(message => ({ role: message.role, content: Array.isArray(message.content) ? message.content.map(part => part.type === 'image_url' ? { type: 'image_url', image_url: { url: part.image_url.url } } : { type: 'text', text: part.text }) : message.content,
 		tool_call_id: message.tool_call_id, tool_calls: message.tool_calls }));
 	const tools = body.tools?.map(tool => ({ type: 'function', function: tool.function }));
 	return { model: body.model, messages, tools, stream: body.stream === true,
@@ -54,7 +59,10 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 		throw new BudgetError('pricing_unavailable', 'Некорректная цена API в каталоге.', 503);
 	}
 	// One token per UTF-8 byte plus protocol overhead: deliberately conservative reservation.
-	const promptUpperBound = Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools }), 'utf8') + 1024 + body.messages.length * 32;
+	const images = screenshotCount(body.messages);
+	if (images && (source !== 'bedrock' || !supportsScreenshots(model))) { throw new BudgetError('vision_unavailable', 'Для скриншотов выберите Claude через Bedrock.', 400); }
+	const promptUpperBound = images ? await countBedrockInput(body, model)
+		: Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools }), 'utf8') + 1024 + body.messages.length * 32;
 	if (promptUpperBound > 200_000) { throw new BudgetError('context_too_large', 'Уменьшите контекст: внутренний тест ограничивает размер запроса.', 400); }
 	return { input, output, reservedMicros: costMicros(promptUpperBound, body.max_tokens || 4096, input, output) };
 }

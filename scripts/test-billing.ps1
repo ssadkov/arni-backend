@@ -34,8 +34,12 @@ try {
 	if ($LASTEXITCODE -ne 0) { throw 'Migration fixture creation failed' }
 	& .\node_modules\.bin\prisma.cmd db execute --file deploy/billing/20261014-budget.sql --schema prisma/schema.prisma
 	if ($LASTEXITCODE -ne 0) { throw 'Billing migration failed' }
+	& .\node_modules\.bin\prisma.cmd db execute --file deploy/billing/20261014-media.sql --schema prisma/schema.prisma
+	if ($LASTEXITCODE -ne 0) { throw 'Media migration failed' }
 	node scripts/test-billing.cjs
 	if ($LASTEXITCODE -ne 0) { throw 'Billing checks failed' }
+	node scripts/test-media.cjs
+	if ($LASTEXITCODE -ne 0) { throw 'Media checks failed' }
 } finally {
 	if ($taskPgStarted) { & "$taskPgBin\pg_ctl.exe" -D $taskCluster -m immediate -w stop }
 	foreach ($taskName in $taskEnvironmentNames) { [Environment]::SetEnvironmentVariable($taskName, $taskSavedEnvironment[$taskName], 'Process') }

@@ -27,7 +27,8 @@ async function lockBudget(tx: Prisma.TransactionClient, userId: string) {
 	return tx.accountBudget.findUniqueOrThrow({ where: { userId } });
 }
 
-export async function reserveBudget(userId: string, model: string, source: string, reservedMicros: number, inputPerMillion: number, outputPerMillion: number) {
+export type UsageMetadata = { requestId?: string; requestedModel?: string; operation?: 'chat' | 'image'; region?: string; unitPriceMicros?: number; imageCount?: number };
+export async function reserveBudget(userId: string, model: string, source: string, reservedMicros: number, inputPerMillion: number, outputPerMillion: number, metadata: UsageMetadata = {}) {
 	if (!Number.isSafeInteger(reservedMicros) || reservedMicros < 0 || reservedMicros > 1_000_000_000
 		|| ![inputPerMillion, outputPerMillion].every(value => Number.isFinite(value) && value >= 0)) {
 		throw new BudgetError('pricing_unavailable', 'Некорректный резерв API.', 503);
@@ -54,7 +55,7 @@ export async function reserveBudget(userId: string, model: string, source: strin
 		}
 		const fiveHourStartedAt = snapshot.fiveHour.startedAt || now;
 		const weeklyStartedAt = snapshot.weekly.startedAt || now;
-		const reservation = await tx.budgetReservation.create({ data: { userId, model, source, reservedMicros, inputPerMillion, outputPerMillion, fiveHourStartedAt, weeklyStartedAt } });
+		const reservation = await tx.budgetReservation.create({ data: { userId, model, source, reservedMicros, inputPerMillion, outputPerMillion, fiveHourStartedAt, weeklyStartedAt, ...metadata } });
 		await tx.accountBudget.update({ where: { userId }, data: {
 			balanceMicros: { decrement: reservedMicros }, fiveHourStartedAt, weeklyStartedAt,
 			fiveHourUsedMicros: snapshot.fiveHour.usedMicros + reservedMicros,
@@ -73,7 +74,8 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		const budget = await lockBudget(tx, initial.userId);
 		const reservation = await tx.budgetReservation.findUniqueOrThrow({ where: { id } });
 		if (reservation.status !== 'pending') { return; }
-		const calculated = usage ? costMicros(usage.prompt_tokens, usage.completion_tokens, reservation.inputPerMillion, reservation.outputPerMillion) : reservation.reservedMicros;
+		const calculated = reservation.operation === 'image' ? reservation.reservedMicros
+			: usage ? costMicros(usage.prompt_tokens, usage.completion_tokens, reservation.inputPerMillion, reservation.outputPerMillion) : reservation.reservedMicros;
 		// OpenRouter reports actual USD cost; Bedrock uses the snapshotted catalog rates.
 		const actual = rejected ? 0 : usage?.cost !== undefined && reservation.source === 'openrouter'
 			? costMicros(1, 0, usage.cost * 1_000_000, 0) : calculated;
@@ -94,7 +96,11 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		}
 		if (!rejected) {
 			await tx.usageLog.create({ data: { userId: budget.userId, model: reservation.model, source: reservation.source,
-				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: actual, accounting: status } });
+				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: actual, accounting: status,
+				costBasis: !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
+				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation, region: reservation.region,
+				inputPerMillion: reservation.inputPerMillion, outputPerMillion: reservation.outputPerMillion,
+				unitPriceMicros: reservation.unitPriceMicros, imageCount: reservation.imageCount } });
 		}
 	});
 }

@@ -2,11 +2,14 @@ import {
 	BedrockRuntimeClient,
 	ConverseCommand,
 	ConverseStreamCommand,
+	CountTokensCommand,
 	type ContentBlock,
 	type Message,
 	type Tool,
 	type ToolConfiguration,
 } from '@aws-sdk/client-bedrock-runtime';
+import { decodeScreenshot, screenshotCount, supportsScreenshots } from './vision';
+import { BudgetError } from '@/lib/budget';
 
 type ChatToolCall = {
 	id?: string;
@@ -75,7 +78,17 @@ function pushMessage(messages: Message[], role: 'user' | 'assistant', blocks: Co
 	messages.push({ role, content: blocks });
 }
 
-function toConverse(body: ChatBody): { system: { text: string }[]; messages: Message[]; toolConfig?: ToolConfiguration } {
+function contentBlocks(content: unknown): ContentBlock[] {
+	if (!Array.isArray(content)) { return [{ text: textOf(content) || ' ' }]; }
+	return content.map(part => {
+		if (part?.type !== 'image_url') { return { text: textOf([part]) || ' ' }; }
+		const { format, bytes } = decodeScreenshot(part.image_url?.url);
+		return { image: { format, source: { bytes } } };
+	});
+}
+
+export function toConverse(body: ChatBody): { system: { text: string }[]; messages: Message[]; toolConfig?: ToolConfiguration } {
+	screenshotCount((body.messages || []) as Array<Record<string, unknown>>);
 	const system: { text: string }[] = [];
 	const messages: Message[] = [];
 
@@ -92,7 +105,7 @@ function toConverse(body: ChatBody): { system: { text: string }[]; messages: Mes
 			pushMessage(messages, 'user', [{
 				toolResult: {
 					toolUseId: message.tool_call_id || 'tool',
-					content: [{ text: textOf(message.content) || ' ' }],
+					content: contentBlocks(message.content) as never,
 				},
 			}]);
 			continue;
@@ -126,7 +139,7 @@ function toConverse(body: ChatBody): { system: { text: string }[]; messages: Mes
 			continue;
 		}
 
-		pushMessage(messages, 'user', [{ text: textOf(message.content) || ' ' }]);
+		pushMessage(messages, 'user', contentBlocks(message.content));
 	}
 
 	if (messages[0]?.role === 'assistant') {
@@ -215,11 +228,13 @@ async function resolveModelId(requested: string | undefined): Promise<string> {
 	return chosen;
 }
 
-function client(): BedrockRuntimeClient {
+export function client(awsRegion = region(), maxAttempts = 3, tokenOverride?: string): BedrockRuntimeClient {
 	// SigV4 стоит в списке схем раньше bearer. Явный приоритет нужен, чтобы
 	// использовался AWS_BEARER_TOKEN_BEDROCK, а не локальный AWS-профиль.
 	return new BedrockRuntimeClient({
-		region: region(),
+		region: awsRegion,
+		maxAttempts,
+		...(tokenOverride ? { token: { token: tokenOverride } } : {}),
 		authSchemePreference: ['httpBearerAuth'],
 	});
 }
@@ -280,7 +295,9 @@ function providerHeaders(modelId: string): Headers {
 
 function failure(error: unknown): Response {
 	const message = error instanceof Error ? error.message : 'Bedrock request failed';
-	return Response.json({ error: { message, code: 'bedrock_error' } }, { status: 502 });
+	const awsStatus = (error as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+	return Response.json({ error: { message, code: error instanceof BudgetError ? error.code : 'bedrock_error' } },
+		{ status: error instanceof BudgetError ? error.status : awsStatus && awsStatus >= 400 && awsStatus < 500 ? awsStatus : 502 });
 }
 
 export async function completeWithBedrock(rawBody: unknown, forcedModelId?: string): Promise<Response> {
@@ -291,6 +308,9 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 
 	try {
 		const modelId = forcedModelId || await resolveModelId(body.model);
+		if (screenshotCount((body.messages || []) as Array<Record<string, unknown>>) && !supportsScreenshots(modelId)) {
+			throw new BudgetError('vision_unavailable', 'Выберите Claude с поддержкой скриншотов.', 400);
+		}
 		const { system, messages, toolConfig } = toConverse(body);
 		const inferenceConfig = {
 			maxTokens: maxTokens(body),
@@ -354,6 +374,21 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 	} catch (error) {
 		console.error('Bedrock converse failed:', error);
 		return failure(error);
+	}
+}
+
+export async function countBedrockInput(body: ChatBody, modelId: string) {
+	if (!bearerToken()) { throw new BudgetError('vision_count_unavailable', 'Bedrock не настроен для подсчёта токенов скриншота.', 503); }
+	try {
+		// CountTokens targets the foundation model, not its cross-region inference profile.
+		const countingModelId = modelId.replace(/^(?:us|eu|apac|global)\.(?=anthropic\.)/, '');
+		const runtime = client();
+		const response = await runtime.send(new CountTokensCommand({ modelId: countingModelId, input: { converse: toConverse(body) } }),
+			{ abortSignal: AbortSignal.timeout(30_000) }).finally(() => runtime.destroy());
+		if (!Number.isSafeInteger(response.inputTokens) || response.inputTokens! < 0) { throw new Error('Invalid token count'); }
+		return response.inputTokens!;
+	} catch {
+		throw new BudgetError('vision_count_unavailable', 'Не удалось подсчитать токены скриншота. Проверьте доступ bedrock:CountTokens; повторите запрос позже.', 503);
 	}
 }
 

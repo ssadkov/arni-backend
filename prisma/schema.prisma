@@ -32,6 +32,7 @@ model User {
   identities    Identity[]
   usageLogs     UsageLog[]
   modelRequests ModelRequest[]
+  mediaGenerations MediaGeneration[]
   modelAccess   UserModelAccess[]
   budget        AccountBudget?
 }
@@ -54,6 +55,11 @@ model ModelRequest {
   id         String   @id @default(uuid())
   userId     String
   model      String
+  requestId  String?
+  requestedModel String?
+  operation  String @default("chat")
+  source     String?
+  region     String?
   statusCode Int
   durationMs Int
   error      String?
@@ -65,6 +71,7 @@ model ModelRequest {
 
   @@index([createdAt])
   @@index([model, createdAt])
+  @@index([requestId])
   @@index([userId, createdAt])
 }
 
@@ -78,6 +85,15 @@ model UsageLog {
   source           String?
   costMicros       Int?
   accounting       String? // reported, estimated, or legacy
+  costBasis        String? // provider, catalog, reservation; separate from legacy token-balance accounting
+  requestId        String? @unique
+  requestedModel   String?
+  operation        String @default("chat")
+  region           String?
+  inputPerMillion  Float?
+  outputPerMillion Float?
+  unitPriceMicros  Int?
+  imageCount       Int @default(0)
   createdAt        DateTime @default(now())
 
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -125,6 +141,12 @@ model BudgetReservation {
   reservedMicros  Int
   inputPerMillion Float
   outputPerMillion Float
+  requestId       String? @unique
+  requestedModel  String?
+  operation       String @default("chat")
+  region          String?
+  unitPriceMicros Int?
+  imageCount      Int @default(0)
   status          String   @default("pending") // reported, estimated, refunded
   costMicros      Int?
   promptTokens    Int?
@@ -134,6 +156,26 @@ model BudgetReservation {
   createdAt       DateTime @default(now())
   budget          AccountBudget @relation(fields: [userId], references: [userId], onDelete: Cascade)
   @@index([userId, status])
+}
+
+// Private results allow safe replay without calling a billed model again. Prompts are not stored.
+model MediaGeneration {
+  id            String @id @default(uuid())
+  userId        String
+  requestKey    String
+  payloadHash   String
+  model         String
+  region        String
+  status        String @default("pending")
+  reservationId String? @unique
+  image         Bytes?
+  mimeType      String?
+  seed          String?
+  errorCode     String?
+  createdAt     DateTime @default(now())
+  user          User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, requestKey])
+  @@index([userId, createdAt])
 }
 
 // Каталог Bedrock. enabled — доступна ли модель всем, у кого нет личного исключения.

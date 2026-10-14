@@ -10,6 +10,11 @@ export interface ModelRequestRecord {
 	durationMs: number;
 	error?: string | null;
 	routedFrom?: string | null;
+	requestId?: string;
+	requestedModel?: string;
+	operation?: 'chat' | 'image';
+	source?: string;
+	region?: string;
 }
 
 function compactError(error: string | null | undefined): string | null {
@@ -34,6 +39,8 @@ export async function recordModelRequest(input: ModelRequestRecord): Promise<voi
 				durationMs: Math.max(0, Math.round(input.durationMs)),
 				error: compactError(input.error),
 				routedFrom: input.routedFrom ? input.routedFrom.slice(0, MODEL_MAX_LENGTH) : null,
+				requestId: input.requestId, requestedModel: input.requestedModel?.slice(0, MODEL_MAX_LENGTH),
+				operation: input.operation, source: input.source, region: input.region,
 			},
 		});
 	} catch (error) {

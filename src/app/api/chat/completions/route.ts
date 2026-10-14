@@ -19,6 +19,8 @@ import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
 import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
 import { validUsage, type ReportedUsage } from '@/lib/budgetPolicy';
 import { usageStream } from '@/lib/usageStream';
+import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
+import { costMicros } from '@/lib/budgetPolicy';
 
 export const maxDuration = 300;
 
@@ -40,12 +42,15 @@ function freeLimitResponse(snapshot: FreeStepSnapshot) {
 
 export async function POST(req: NextRequest) {
   const startedAt = Date.now();
+  const requestId = crypto.randomUUID();
   let reservedUserId: string | null = null;
   let trackedUserId: string | undefined;
   let trackedModel = 'unknown';
   let routedFrom: string | null = null;
   let budgetReservationId: string | null = null;
   let upstreamDispatched = false;
+  let requestedModel = 'unknown';
+  let trackedSource: string | undefined;
   const track = (statusCode: number, error?: string | null, model = trackedModel) => {
     if (!trackedUserId) {
       return Promise.resolve();
@@ -57,6 +62,7 @@ export async function POST(req: NextRequest) {
       durationMs: Date.now() - startedAt,
       error,
       routedFrom,
+      requestId, requestedModel, source: trackedSource, region: trackedSource === 'bedrock' ? process.env.AWS_REGION || 'us-east-1' : undefined,
     });
   };
   try {
@@ -93,11 +99,18 @@ export async function POST(req: NextRequest) {
     // OpenRouter's :free variants do not spend Arni's paid-model allowance.
     // Bedrock подменяет модель на inference profile Claude и не тратит квоту :free.
     let body;
-    try { body = await req.json(); } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }); }
+    try {
+      const raw = await req.text();
+      if (Buffer.byteLength(raw) > MAX_CHAT_BYTES) { return NextResponse.json({ error: 'Request exceeds 3.8 MB; resize screenshots' }, { status: 413 }); }
+      body = JSON.parse(raw);
+    } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }); }
     if (!body || typeof body !== 'object' || Array.isArray(body)) { return NextResponse.json({ error: 'Invalid request' }, { status: 400 }); }
     const budget = await prisma.accountBudget.findUnique({ where: { userId: user.id } });
-    if (budget) { body = managedBody(body as BudgetBody); }
     const provider = resolveLlmProvider(user.llmProvider);
+    trackedSource = provider;
+    requestedModel = typeof body.model === 'string' ? body.model.slice(0, 200) : 'unknown';
+    if (budget) { body = managedBody(body as BudgetBody, provider === 'bedrock'); }
+    const images = screenshotCount(body.messages || []);
     const isFreeModel = provider === 'openrouter' && typeof body.model === 'string' && body.model.endsWith(':free');
     trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
 
@@ -141,6 +154,7 @@ export async function POST(req: NextRequest) {
         }, { status: 403 });
       }
       forcedBedrockModel = allowed;
+      trackedModel = allowed;
     }
 
     let freeSteps: FreeStepSnapshot | null = null;
@@ -177,9 +191,12 @@ export async function POST(req: NextRequest) {
       const model = forcedBedrockModel || body.model;
       if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
       const price = await budgetPrice(body, provider, model);
-      const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output);
+      const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output,
+        { requestId, requestedModel, imageCount: images, region: provider === 'bedrock' ? process.env.AWS_REGION || 'us-east-1' : undefined });
       budgetReservationId = reservation.id;
     }
+    const catalogPrice = provider === 'bedrock' && forcedBedrockModel
+      ? await prisma.bedrockModel.findUnique({ where: { id: forcedBedrockModel } }) : null;
     upstreamDispatched = true;
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel)
@@ -211,12 +228,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const servedModel = response.headers.get('X-Llm-Model') || body.model || trackedModel;
+    const servedModel = response.headers.get('X-Llm-Model') || forcedBedrockModel || body.model || trackedModel;
 
     if (!response.ok) {
       if (budgetReservationId) { await settleBudget(budgetReservationId, null, response.status >= 400 && response.status < 500 && response.status !== 408); }
       const errorText = await response.text();
-      await track(response.status, errorText);
+      await track(response.status, errorText, servedModel);
       if (reservedUserId) {
         freeSteps = await releaseFreeStep(reservedUserId);
         reservedUserId = null;
@@ -240,7 +257,13 @@ export async function POST(req: NextRequest) {
       if (!usage) { return; }
       const promptTokens = usage.prompt_tokens;
       const completionTokens = usage.completion_tokens;
-      const data = { userId: user.id, model: servedModel, promptTokens, completionTokens, source: provider, accounting: 'legacy' };
+      const input = catalogPrice?.inputPerMillion; const output = catalogPrice?.outputPerMillion;
+      const measuredCost = provider === 'openrouter' && usage.cost !== undefined ? Math.ceil(usage.cost * 1_000_000)
+        : isFreeModel ? 0 : input != null && output != null ? costMicros(promptTokens, completionTokens, input, output) : null;
+      const data = { userId: user.id, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: provider,
+        imageCount: images, region: provider === 'bedrock' ? process.env.AWS_REGION || 'us-east-1' : null,
+        inputPerMillion: input, outputPerMillion: output, costMicros: measuredCost,
+        accounting: 'legacy', costBasis: measuredCost == null ? null : provider === 'openrouter' ? 'provider' : 'catalog' };
       if (isFreeModel) { await prisma.usageLog.create({ data }); }
       else {
         await prisma.$transaction([
