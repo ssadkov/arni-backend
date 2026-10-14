@@ -31,9 +31,8 @@ export async function GET(req: NextRequest) {
       if (managed && resolveLlmProvider(user.llmProvider) === 'bedrock') {
         const allowed = await modelsAllowedForUser(userId);
         const selected = await modelIdForUser(userId, user.bedrockModelId);
-        // The account's model is server-controlled; don't advertise a different model.
-        return NextResponse.json({ arni_managed: true, data: allowed.filter(model => model.id === selected).map(model => ({
-          id: model.id, name: model.name, supported_parameters: ['tools'], context_length: 32768,
+        return NextResponse.json({ arni_managed: true, data: allowed.filter(model => model.inputPerMillion != null && model.outputPerMillion != null).map(model => ({
+          id: model.id, name: model.name, arni_default: model.id === selected, supported_parameters: ['tools'], context_length: 32768,
           top_provider: { context_length: 32768, max_completion_tokens: 4096 }, architecture: { input_modalities: supportsScreenshots(model.id) ? ['text', 'image'] : ['text'] },
         })) }, { headers: { 'Cache-Control': 'private, no-store' } });
       }

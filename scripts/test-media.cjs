@@ -17,6 +17,7 @@ const imagePart = { type: 'image_url', image_url: { url: `data:image/png;base64,
 let invocations = 0, countCalls = 0, mode = 'success', captured;
 runtime.BedrockRuntimeClient.prototype.send = async function (command) {
 	captured = command.input;
+	if (command instanceof runtime.ConverseCommand) { return { output: { message: { role: 'assistant', content: [{ text: 'Selected model response' }] } }, usage: { inputTokens: 10, outputTokens: 5 }, stopReason: 'end_turn' }; }
 	if (command instanceof runtime.CountTokensCommand) { countCalls++; if (mode === 'count-failed') { throw new Error('Unsupported'); } return { inputTokens: 2000 }; }
 	invocations++;
 	if (mode === 'rejected') { throw Object.assign(new Error('Denied'), { $metadata: { httpStatusCode: 403 } }); }
@@ -37,6 +38,26 @@ async function main() {
 	await prisma.accountBudget.create({ data: { userId, balanceMicros: 2_000_000, validUntil: new Date(Date.now() + 86400_000), fiveHourLimitMicros: 2_000_000, weeklyLimitMicros: 2_000_000, fiveHourRequestLimit: 100, weeklyRequestLimit: 100 } });
 	const model = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
 	await prisma.bedrockModel.upsert({ where: { id: model }, update: { inputPerMillion: 3, outputPerMillion: 15 }, create: { id: model, name: 'Screenshot test', inputPerMillion: 3, outputPerMillion: 15, enabled: true } });
+	await check('managed catalog offers allowed models and selected model is invoked and billed; denied model is blocked', async () => {
+		const second = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+		await prisma.bedrockModel.upsert({ where: { id: second }, update: { enabled: false, inputPerMillion: 1, outputPerMillion: 5 }, create: { id: second, name: 'Second model', enabled: false, inputPerMillion: 1, outputPerMillion: 5 } });
+		await prisma.user.update({ where: { id: userId }, data: { llmProvider: 'BEDROCK', bedrockModelId: model } });
+		await prisma.userModelAccess.create({ data: { userId, modelId: second, enabled: true } });
+		const { NextRequest } = require('next/server');
+		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
+		const headers = { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+		const list = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models', { headers }));
+		const catalog = await list.json(); assert.equal(catalog.arni_managed, true);
+		assert.ok(catalog.data.some(row => row.id === second)); assert.equal(catalog.data.find(row => row.id === model).arni_default, true);
+		const post = require('../src/app/api/chat/completions/route.ts').POST;
+		const request = selected => new NextRequest('http://localhost/api/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: selected, messages: [{ role: 'user', content: 'Test selection' }], max_tokens: 50 }) });
+		const result = await post(request(second)); assert.equal(result.status, 200); await result.json();
+		assert.equal(captured.modelId, second);
+		const log = await prisma.usageLog.findFirstOrThrow({ where: { userId, model: second } }); assert.equal(log.requestedModel, second); assert.equal(log.inputPerMillion, 1); assert.equal(log.costMicros, 35);
+		await prisma.userModelAccess.update({ where: { userId_modelId: { userId, modelId: second } }, data: { enabled: false } });
+		assert.equal((await post(request(second))).status, 403);
+		assert.equal((await post(request('us.unknown-model'))).status, 403);
+	});
 	await check('screenshots survive managed sanitization and Converse user/tool conversion', async () => {
 		const body = managedBody({ model, messages: [{ role: 'user', content: [{ type: 'text', text: 'Match this landing' }, imagePart] }, { role: 'tool', tool_call_id: 'shot', content: [imagePart] }], max_tokens: 100 }, true);
 		const converted = toConverse(body);

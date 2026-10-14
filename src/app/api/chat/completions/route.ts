@@ -110,6 +110,9 @@ export async function POST(req: NextRequest) {
     trackedSource = provider;
     requestedModel = typeof body.model === 'string' ? body.model.slice(0, 200) : 'unknown';
     if (budget) { body = managedBody(body as BudgetBody, provider === 'bedrock'); }
+    if (budget && (typeof body.model !== 'string' || !body.model || body.model.length > 200)) {
+      throw new BudgetError('invalid_model', 'Выберите модель.', 400);
+    }
     const images = screenshotCount(body.messages || []);
     const isFreeModel = provider === 'openrouter' && typeof body.model === 'string' && body.model.endsWith(':free');
     trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
@@ -145,9 +148,9 @@ export async function POST(req: NextRequest) {
 
     let forcedBedrockModel: string | undefined;
     if (provider === 'bedrock' && (budget || await prisma.bedrockModel.count() > 0)) {
-      const allowed = await modelIdForUser(user.id, user.bedrockModelId);
+      const allowed = await modelIdForUser(user.id, user.bedrockModelId, budget ? body.model : undefined);
       if (!allowed) {
-        const message = 'Для этого аккаунта не включена ни одна модель Bedrock.';
+        const message = 'Модель Bedrock не разрешена для этого аккаунта. Обновите список моделей или обратитесь к администратору.';
         await track(403, message);
         return NextResponse.json({
           error: { code: 'model_disabled', message },
@@ -155,6 +158,7 @@ export async function POST(req: NextRequest) {
       }
       forcedBedrockModel = allowed;
       trackedModel = allowed;
+      body.model = allowed;
     }
 
     let freeSteps: FreeStepSnapshot | null = null;
