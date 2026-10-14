@@ -69,6 +69,13 @@ async function main() {
 		await assert.rejects(generateImage(userId, crypto.randomUUID(), { prompt: 'A landing illustration' }), error => error.code === 'image_generation_disabled');
 		assert.equal(invocations, 0);
 	});
+	await check('free fallback records the served model while preserving the requested one', async () => {
+		const id = crypto.randomUUID();
+		const reservation = await reserveBudget(userId, 'first:free', 'openrouter', 0, 0, 0, { requestId: id, requestedModel: 'first:free' });
+		await settleBudget(reservation.id, { prompt_tokens: 10, completion_tokens: 5 }, false, 'healthy:free');
+		const log = await prisma.usageLog.findUniqueOrThrow({ where: { requestId: id } });
+		assert.deepEqual([log.model, log.requestedModel, log.costMicros], ['healthy:free', 'first:free', 0]);
+	});
 	process.env.ARNI_IMAGE_GENERATION_ENABLED = 'true';
 	await check('concurrent image/replay uses one invocation and one charge, changed payload conflicts', async () => {
 		const key = crypto.randomUUID(); const input = { prompt: 'A landing illustration' };
@@ -76,6 +83,7 @@ async function main() {
 		const first = responses.find(response => response.status === 'fulfilled').value;
 		const again = await generateImage(userId, key, input);
 		assert.equal(first.id, again.id); assert.equal(invocations, 1);
+		assert.equal(again.costMicros, IMAGE_PRICE_MICROS);
 		await assert.rejects(generateImage(userId, key, { prompt: 'Another image' }), error => error.code === 'idempotency_conflict');
 		const log = await prisma.usageLog.findUniqueOrThrow({ where: { requestId: first.id } });
 		assert.deepEqual([log.model, log.operation, log.imageCount, log.unitPriceMicros, log.costMicros], [IMAGE_MODEL, 'image', 1, IMAGE_PRICE_MICROS, IMAGE_PRICE_MICROS]);

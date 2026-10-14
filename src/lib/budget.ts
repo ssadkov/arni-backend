@@ -68,12 +68,15 @@ export async function reserveBudget(userId: string, model: string, source: strin
 }
 
 /** Missing usage stays charged at the reservation; only confirmed upstream rejection is refunded. */
-export async function settleBudget(id: string, usage: ReportedUsage | null, rejected = false) {
+export async function settleBudget(id: string, usage: ReportedUsage | null, rejected = false, servedModel?: string) {
 	return prisma.$transaction(async tx => {
 		const initial = await tx.budgetReservation.findUniqueOrThrow({ where: { id } });
 		const budget = await lockBudget(tx, initial.userId);
 		const reservation = await tx.budgetReservation.findUniqueOrThrow({ where: { id } });
 		if (reservation.status !== 'pending') { return; }
+		// Free-model fallback preserves the zero tariff while recording the model that served it.
+		const billedModel = reservation.source === 'openrouter' && reservation.model.endsWith(':free') && servedModel?.endsWith(':free')
+			? servedModel : reservation.model;
 		const calculated = reservation.operation === 'image' ? reservation.reservedMicros
 			: usage ? costMicros(usage.prompt_tokens, usage.completion_tokens, reservation.inputPerMillion, reservation.outputPerMillion) : reservation.reservedMicros;
 		// OpenRouter reports actual USD cost; Bedrock uses the snapshotted catalog rates.
@@ -81,7 +84,7 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 			? costMicros(1, 0, usage.cost * 1_000_000, 0) : calculated;
 		const refund = reservation.reservedMicros - actual;
 		const status = rejected ? 'refunded' : usage ? 'reported' : 'estimated';
-		await tx.budgetReservation.update({ where: { id }, data: { status, costMicros: actual, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens } });
+		await tx.budgetReservation.update({ where: { id }, data: { model: billedModel, status, costMicros: actual, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens } });
 		await tx.accountBudget.update({ where: { userId: budget.userId }, data: {
 			balanceMicros: { increment: refund },
 			...(budget.fiveHourStartedAt?.getTime() === reservation.fiveHourStartedAt.getTime() ? {
@@ -95,7 +98,7 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 			await tx.budgetEntry.create({ data: { userId: budget.userId, key: `settle:${id}`, kind: refund > 0 ? 'refund' : 'adjustment', amountMicros: refund, note: `${status}: ${reservation.model}` } });
 		}
 		if (!rejected) {
-			await tx.usageLog.create({ data: { userId: budget.userId, model: reservation.model, source: reservation.source,
+			await tx.usageLog.create({ data: { userId: budget.userId, model: billedModel, source: reservation.source,
 				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: actual, accounting: status,
 				costBasis: !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
 				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation, region: reservation.region,

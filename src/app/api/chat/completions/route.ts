@@ -231,7 +231,7 @@ export async function POST(req: NextRequest) {
     const servedModel = response.headers.get('X-Llm-Model') || forcedBedrockModel || body.model || trackedModel;
 
     if (!response.ok) {
-      if (budgetReservationId) { await settleBudget(budgetReservationId, null, response.status >= 400 && response.status < 500 && response.status !== 408); }
+      if (budgetReservationId) { await settleBudget(budgetReservationId, null, response.status >= 400 && response.status < 500 && response.status !== 408, servedModel); }
       const errorText = await response.text();
       await track(response.status, errorText, servedModel);
       if (reservedUserId) {
@@ -251,7 +251,7 @@ export async function POST(req: NextRequest) {
 
     const recordUsage = async (usage: ReportedUsage | null) => {
       if (budgetReservationId) {
-        await settleBudget(budgetReservationId, usage);
+        await settleBudget(budgetReservationId, usage, false, servedModel);
         return;
       }
       if (!usage) { return; }

@@ -22,10 +22,11 @@ export function imageRequest(body: unknown) {
 	return { prompt: input.prompt.trim(), aspect_ratio: String(input.aspect_ratio || '16:9'), output_format: 'png' };
 }
 
-function result(row: { id: string; model: string; status: string; errorCode: string | null }) {
+async function result(row: { id: string; model: string; status: string; errorCode: string | null }) {
 	if (row.status === 'pending') { throw new BudgetError('image_in_progress', 'Генерация уже запущена. Проверьте результат по тому же ключу; новая оплата не списывается.', 409); }
 	if (row.status !== 'succeeded') { throw new BudgetError(row.errorCode || 'image_failed', 'Этот запрос завершился без изображения. Не запускайте его автоматически повторно; проверьте доступ и журнал расходов.', 409); }
-	return { id: row.id, model: row.model, costMicros: IMAGE_PRICE_MICROS, data: [{ url: `/api/images/${row.id}`, mime_type: 'image/png' }] };
+	const usage = await prisma.usageLog.findUnique({ where: { requestId: row.id }, select: { costMicros: true } });
+	return { id: row.id, model: row.model, costMicros: usage?.costMicros ?? null, data: [{ url: `/api/images/${row.id}`, mime_type: 'image/png' }] };
 }
 
 export async function generateImage(userId: string, requestKey: string, body: unknown) {
