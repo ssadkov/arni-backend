@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/adminAuth';
 import prisma from '@/lib/prisma';
 import { freeStepSnapshot } from '@/lib/freeSteps';
+import { budgetSnapshot } from '@/lib/budget';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,7 +14,7 @@ export async function GET(req: NextRequest) {
 
 	const users = await prisma.user.findMany({
 		orderBy: { createdAt: 'desc' },
-		include: { identities: true },
+		include: { identities: true, budget: true },
 	});
 
 	return NextResponse.json({
@@ -25,6 +26,7 @@ export async function GET(req: NextRequest) {
 			isBanned: user.isBanned,
 			llmProvider: user.llmProvider,
 			freeSteps: freeStepSnapshot(user),
+			budget: user.budget ? budgetSnapshot(user.budget) : null,
 			identities: user.identities.map((identity) => ({
 				provider: identity.provider,
 				providerId: identity.providerId,

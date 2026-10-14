@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { after, NextRequest, NextResponse } from 'next/server';
 import { decryptJWT } from '@/lib/jwt';
 import prisma from '@/lib/prisma';
 import {
@@ -15,6 +15,12 @@ import { completeWithOpenRouter } from '@/lib/llm/openrouter';
 import { resolveLlmProvider } from '@/lib/llm/provider';
 import { recordModelRequest } from '@/lib/modelRequests';
 import { rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
+import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
+import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
+import { validUsage, type ReportedUsage } from '@/lib/budgetPolicy';
+import { usageStream } from '@/lib/usageStream';
+
+export const maxDuration = 300;
 
 function freeLimitResponse(snapshot: FreeStepSnapshot) {
   return NextResponse.json({
@@ -38,6 +44,8 @@ export async function POST(req: NextRequest) {
   let trackedUserId: string | undefined;
   let trackedModel = 'unknown';
   let routedFrom: string | null = null;
+  let budgetReservationId: string | null = null;
+  let upstreamDispatched = false;
   const track = (statusCode: number, error?: string | null, model = trackedModel) => {
     if (!trackedUserId) {
       return Promise.resolve();
@@ -62,7 +70,7 @@ export async function POST(req: NextRequest) {
     let jwtPayload;
     try {
       jwtPayload = await decryptJWT(token);
-    } catch (e) {
+    } catch {
       return NextResponse.json({ error: 'Invalid Token' }, { status: 401 });
     }
 
@@ -84,14 +92,18 @@ export async function POST(req: NextRequest) {
 
     // OpenRouter's :free variants do not spend Arni's paid-model allowance.
     // Bedrock подменяет модель на inference profile Claude и не тратит квоту :free.
-    const body = await req.json();
+    let body;
+    try { body = await req.json(); } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) { return NextResponse.json({ error: 'Invalid request' }, { status: 400 }); }
+    const budget = await prisma.accountBudget.findUnique({ where: { userId: user.id } });
+    if (budget) { body = managedBody(body as BudgetBody); }
     const provider = resolveLlmProvider(user.llmProvider);
     const isFreeModel = provider === 'openrouter' && typeof body.model === 'string' && body.model.endsWith(':free');
     trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
 
     // Платные модели OpenRouter — только в тарифе Pro. Пока его нет, клиент предлагает
     // записаться в лист ожидания (POST /api/waitlist).
-    if (provider === 'openrouter' && !isFreeModel && user.plan !== 'PRO') {
+    if (!budget && provider === 'openrouter' && !isFreeModel && user.plan !== 'PRO') {
       const message = 'Эта модель будет доступна в тарифе Pro. Выберите бесплатную модель или нажмите «Сообщить о запуске», чтобы узнать, когда Pro откроется.';
       await track(402, message);
       return NextResponse.json({
@@ -102,7 +114,7 @@ export async function POST(req: NextRequest) {
       }, { status: 402 });
     }
 
-    if (provider === 'openrouter' && !isFreeModel && user.tokenBalance <= 0) {
+    if (!budget && provider === 'openrouter' && !isFreeModel && user.tokenBalance <= 0) {
       const message = 'На балансе закончились токены для платных моделей.';
       await track(402, message);
       return NextResponse.json({
@@ -110,7 +122,7 @@ export async function POST(req: NextRequest) {
       }, { status: 402 });
     }
 
-    if (provider === 'bedrock' && user.tokenBalance <= 0) {
+    if (!budget && provider === 'bedrock' && user.tokenBalance <= 0) {
       const message = 'На балансе закончились токены для Claude через Bedrock.';
       await track(402, message);
       return NextResponse.json({
@@ -119,7 +131,7 @@ export async function POST(req: NextRequest) {
     }
 
     let forcedBedrockModel: string | undefined;
-    if (provider === 'bedrock' && await prisma.bedrockModel.count() > 0) {
+    if (provider === 'bedrock' && (budget || await prisma.bedrockModel.count() > 0)) {
       const allowed = await modelIdForUser(user.id, user.bedrockModelId);
       if (!allowed) {
         const message = 'Для этого аккаунта не включена ни одна модель Bedrock.';
@@ -132,7 +144,7 @@ export async function POST(req: NextRequest) {
     }
 
     let freeSteps: FreeStepSnapshot | null = null;
-    if (isFreeModel) {
+    if (isFreeModel && !budget) {
       freeSteps = await reserveFreeStep(user.id);
       if (!freeSteps) {
         const fresh = await prisma.user.findUnique({ where: { id: user.id } });
@@ -145,7 +157,7 @@ export async function POST(req: NextRequest) {
     // 3. Подготовка запроса для OpenRouter
     
     // Включаем встроенный подсчет токенов для стриминга (OpenAI совместимый параметр)
-    if (body.stream && !body.stream_options) {
+    if (body.stream) {
       body.stream_options = { include_usage: true };
     }
 
@@ -161,6 +173,14 @@ export async function POST(req: NextRequest) {
     }
 
     // 4. Выбранный провайдер. Ответ всегда в формате OpenAI, чтобы редактор не менялся.
+    if (budget) {
+      const model = forcedBedrockModel || body.model;
+      if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
+      const price = await budgetPrice(body, provider, model);
+      const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output);
+      budgetReservationId = reservation.id;
+    }
+    upstreamDispatched = true;
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel)
       : await completeWithOpenRouter(body);
@@ -179,6 +199,7 @@ export async function POST(req: NextRequest) {
         trackedModel = routed.model;
         response = await completeWithOpenRouter(body);
       } else {
+        if (budgetReservationId) { await settleBudget(budgetReservationId, null); }
         if (reservedUserId) {
           freeSteps = await releaseFreeStep(reservedUserId);
           reservedUserId = null;
@@ -193,6 +214,7 @@ export async function POST(req: NextRequest) {
     const servedModel = response.headers.get('X-Llm-Model') || body.model || trackedModel;
 
     if (!response.ok) {
+      if (budgetReservationId) { await settleBudget(budgetReservationId, null, response.status >= 400 && response.status < 500 && response.status !== 408); }
       const errorText = await response.text();
       await track(response.status, errorText);
       if (reservedUserId) {
@@ -210,56 +232,30 @@ export async function POST(req: NextRequest) {
     // Шаг уже зарезервирован: ответ OpenRouter принят, даже если поток оборвётся.
     reservedUserId = null;
 
+    const recordUsage = async (usage: ReportedUsage | null) => {
+      if (budgetReservationId) {
+        await settleBudget(budgetReservationId, usage);
+        return;
+      }
+      if (!usage) { return; }
+      const promptTokens = usage.prompt_tokens;
+      const completionTokens = usage.completion_tokens;
+      const data = { userId: user.id, model: servedModel, promptTokens, completionTokens, source: provider, accounting: 'legacy' };
+      if (isFreeModel) { await prisma.usageLog.create({ data }); }
+      else {
+        await prisma.$transaction([
+          prisma.user.update({ where: { id: user.id }, data: { tokenBalance: { decrement: promptTokens + completionTokens } } }),
+          prisma.usageLog.create({ data }),
+        ]);
+      }
+    };
+
     // 5. Обработка стриминга и перехват использования токенов
     if (body.stream) {
-      let usageRecorded = false;
-      const transformStream = new TransformStream({
-        async transform(chunk, controller) {
-          const text = new TextDecoder().decode(chunk);
-          
-          // Пытаемся найти блок usage, который OpenRouter пришлет в конце благодаря stream_options
-          if (text.includes('"usage":')) {
-            try {
-              // text может содержать несколько SSE сообщений (data: {...}\n\ndata: {...})
-              const lines = text.split('\n');
-              for (const line of lines) {
-                if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-                  const data = JSON.parse(line.slice(6));
-                  if (!usageRecorded && data.usage && data.usage.total_tokens) {
-                    const promptTokens = data.usage.prompt_tokens || 0;
-                    const completionTokens = data.usage.completion_tokens || 0;
-
-                    // Записываем списание и историю вместе до завершения потока.
-                    if (!isFreeModel) {
-                      await prisma.$transaction([
-                        prisma.user.update({
-                          where: { id: user.id },
-                          data: { tokenBalance: { decrement: promptTokens + completionTokens } },
-                        }),
-                        prisma.usageLog.create({
-                          data: { userId: user.id, model: servedModel, promptTokens, completionTokens, source: provider },
-                        }),
-                      ]);
-                    } else {
-                      await prisma.usageLog.create({
-                        data: { userId: user.id, model: servedModel, promptTokens, completionTokens, source: provider },
-                      });
-                    }
-                    usageRecorded = true;
-                  }
-                }
-              }
-            } catch (e) {
-              console.error('Failed to parse usage chunk:', e);
-            }
-          }
-          
-          // Пропускаем чанк дальше к клиенту
-          controller.enqueue(chunk);
-        }
-      });
-
-      return new NextResponse(response.body?.pipeThrough(transformStream), {
+      if (!response.body) { await recordUsage(null); throw new Error('Empty upstream stream'); }
+      const monitored = usageStream(response.body, recordUsage);
+      after(() => monitored.completed);
+      return new NextResponse(monitored.stream, {
         headers: {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
@@ -271,29 +267,17 @@ export async function POST(req: NextRequest) {
 
     // 6. Обработка обычного (не потокового) запроса
     const json = await response.json();
-    if (json.usage) {
-      const promptTokens = json.usage.prompt_tokens || 0;
-      const completionTokens = json.usage.completion_tokens || 0;
-      
-      const usageData = { userId: user.id, model: servedModel, promptTokens, completionTokens, source: provider };
-      if (isFreeModel) {
-        await prisma.usageLog.create({ data: usageData });
-      } else {
-        await prisma.$transaction([
-          prisma.user.update({
-            where: { id: user.id },
-            data: { tokenBalance: { decrement: promptTokens + completionTokens } },
-          }),
-          prisma.usageLog.create({ data: usageData }),
-        ]);
-      }
-    }
+    await recordUsage(validUsage(json.usage));
 
     return NextResponse.json(json, {
       headers: freeSteps ? freeStepHeaders(freeSteps) : undefined,
     });
 
   } catch (error) {
+    if (budgetReservationId) {
+      try { await settleBudget(budgetReservationId, null, !upstreamDispatched); }
+      catch { console.error('Budget remains pending; reconciliation required'); }
+    }
     if (reservedUserId) {
       try {
         await releaseFreeStep(reservedUserId);
@@ -301,7 +285,14 @@ export async function POST(req: NextRequest) {
         console.error('Failed to release free step:', releaseError);
       }
     }
-    console.error('Chat completions error:', error);
+    if (error instanceof BudgetError) {
+      await track(error.status, error.code);
+      return NextResponse.json({ error: { code: error.code, message: error.message, resetsAt: error.resetsAt } }, {
+        status: error.status,
+        headers: error.resetsAt ? { 'Retry-After': String(Math.max(1, Math.ceil((Date.parse(error.resetsAt) - Date.now()) / 1000))) } : undefined,
+      });
+    }
+    console.error('Chat completions failed');
     await track(500, error instanceof Error ? error.message : 'Internal Server Error');
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }

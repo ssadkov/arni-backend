@@ -33,6 +33,7 @@ model User {
   usageLogs     UsageLog[]
   modelRequests ModelRequest[]
   modelAccess   UserModelAccess[]
+  budget        AccountBudget?
 }
 
 model Identity {
@@ -75,9 +76,64 @@ model UsageLog {
   completionTokens Int
   // bedrock или openrouter. Старые строки без источника узнаём по id модели.
   source           String?
+  costMicros       Int?
+  accounting       String? // reported, estimated, or legacy
   createdAt        DateTime @default(now())
 
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// USD micro-units (1 USD = 1,000,000). No conversion of historical tokens to money.
+model AccountBudget {
+  userId             String   @id
+  enabled            Boolean  @default(true)
+  balanceMicros      Int      @default(0)
+  validUntil         DateTime
+  fiveHourLimitMicros Int     @default(2000000)
+  weeklyLimitMicros   Int     @default(5000000)
+  fiveHourRequestLimit Int    @default(150)
+  weeklyRequestLimit Int     @default(1000)
+  fiveHourStartedAt  DateTime?
+  weeklyStartedAt    DateTime?
+  fiveHourUsedMicros Int      @default(0)
+  weeklyUsedMicros   Int      @default(0)
+  fiveHourRequests   Int      @default(0)
+  weeklyRequests     Int      @default(0)
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries           BudgetEntry[]
+  reservations      BudgetReservation[]
+}
+
+model BudgetEntry {
+  id           String   @id @default(uuid())
+  userId       String
+  key          String   @unique // grant/payment/request idempotency key
+  amountMicros Int
+  kind         String   // grant, reserve, refund, adjustment; future payment/subscription
+  note         String
+  payloadHash  String?
+  createdAt    DateTime @default(now())
+  budget       AccountBudget @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  @@index([userId, createdAt])
+}
+
+model BudgetReservation {
+  id              String   @id @default(uuid())
+  userId          String
+  model           String
+  source          String
+  reservedMicros  Int
+  inputPerMillion Float
+  outputPerMillion Float
+  status          String   @default("pending") // reported, estimated, refunded
+  costMicros      Int?
+  promptTokens    Int?
+  completionTokens Int?
+  fiveHourStartedAt DateTime
+  weeklyStartedAt DateTime
+  createdAt       DateTime @default(now())
+  budget          AccountBudget @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  @@index([userId, status])
 }
 
 // Каталог Bedrock. enabled — доступна ли модель всем, у кого нет личного исключения.

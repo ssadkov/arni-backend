@@ -1,0 +1,126 @@
+// Schema before monetary budgets; immutable migration-test fixture.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("PRISMA_DATABASE_URL") // uses connection pooling
+  directUrl = env("DATABASE_URL") // uses a direct connection
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  tokenBalance Int        @default(100000) // 100k free tokens on signup
+  // Дневная квота шагов на моделях :free. freeStepsDay — сутки UTC (YYYY-MM-DD),
+  // к которым относится freeStepsToday. freeStepsTotal не сбрасывается.
+  freeStepsToday Int       @default(0)
+  freeStepsDay   String?
+  freeStepsTotal Int       @default(0)
+  plan         Plan       @default(FREE)
+  isBanned     Boolean    @default(false)
+  // null — брать LLM_PROVIDER из окружения. Иначе персональный провайдер модели.
+  llmProvider  LlmProvider?
+  // Какой профиль Bedrock вызывать, если пользователю доступно несколько.
+  bedrockModelId String?
+  // Лист ожидания платного тарифа: когда нажал «Сообщить о запуске» и куда писать.
+  proWaitlistAt      DateTime?
+  proWaitlistContact String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  identities    Identity[]
+  usageLogs     UsageLog[]
+  modelRequests ModelRequest[]
+  modelAccess   UserModelAccess[]
+}
+
+model Identity {
+  id         String   @id @default(uuid())
+  userId     String
+  provider   String   // e.g., 'yandex', 'vk'
+  providerId String   // External ID from the provider
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+}
+
+// One row per chat-completion attempt, including upstream failures.
+// Prompts are not stored.
+model ModelRequest {
+  id         String   @id @default(uuid())
+  userId     String
+  model      String
+  statusCode Int
+  durationMs Int
+  error      String?
+  // Set when a red free model was replaced before this attempt.
+  routedFrom String?
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([model, createdAt])
+  @@index([userId, createdAt])
+}
+
+model UsageLog {
+  id               String   @id @default(uuid())
+  userId           String
+  model            String
+  promptTokens     Int
+  completionTokens Int
+  // bedrock или openrouter. Старые строки без источника узнаём по id модели.
+  source           String?
+  createdAt        DateTime @default(now())
+
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Каталог Bedrock. enabled — доступна ли модель всем, у кого нет личного исключения.
+model BedrockModel {
+  id                   String   @id
+  name                 String
+  inputPerMillion      Float?
+  outputPerMillion     Float?
+  enabled              Boolean  @default(false)
+  agreementStatus      String?
+  authorizationStatus  String?
+  regionAvailability   String?
+  updatedAt            DateTime @updatedAt
+
+  grants               UserModelAccess[]
+}
+
+// Личное исключение. enabled=true открывает модель даже если она выключена для всех.
+model UserModelAccess {
+  userId   String
+  modelId  String
+  enabled  Boolean
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  model    BedrockModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@id([userId, modelId])
+}
+
+// Лист ожидания Pro с лендинга: человек ещё не пользователь, есть только контакт.
+model WaitlistEntry {
+  id        String   @id @default(uuid())
+  contact   String   @unique // почта или Telegram
+  source    String   @default("landing")
+  createdAt DateTime @default(now())
+}
+
+enum Plan {
+  FREE
+  PRO
+}
+
+enum LlmProvider {
+  OPENROUTER
+  BEDROCK
+}

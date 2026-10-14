@@ -3,11 +3,12 @@ import prisma from '@/lib/prisma';
 import { freeStepSnapshot } from '@/lib/freeSteps';
 import ProviderSelect from './ProviderSelect';
 import UserActions from './UserActions';
+import type { Prisma } from '@prisma/client';
 
 export const dynamic = 'force-dynamic';
 
 export default async function UsersPage() {
-  let users: any[] = [];
+  let users: Prisma.UserGetPayload<{ include: { identities: true; budget: true } }>[] = [];
   let dbError = false;
   const spentByUser = new Map<string, number>();
 
@@ -15,11 +16,11 @@ export default async function UsersPage() {
     const [found, spend] = await Promise.all([
       prisma.user.findMany({
         orderBy: { createdAt: 'desc' },
-        include: { identities: true }
+        include: { identities: true, budget: true }
       }),
       prisma.usageLog.groupBy({
         by: ['userId'],
-        where: { NOT: { model: { endsWith: ':free' } } },
+        where: { NOT: { model: { endsWith: ':free' } }, OR: [{ accounting: null }, { accounting: 'legacy' }] },
         _sum: { promptTokens: true, completionTokens: true },
       }),
     ]);
@@ -27,7 +28,7 @@ export default async function UsersPage() {
     for (const row of spend) {
       spentByUser.set(row.userId, (row._sum.promptTokens || 0) + (row._sum.completionTokens || 0));
     }
-  } catch (error) {
+  } catch {
     dbError = true;
   }
 
@@ -85,7 +86,7 @@ export default async function UsersPage() {
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <div className="flex space-x-2">
-                    {user.identities.map((id: any) => (
+                    {user.identities.map(id => (
                       <span key={id.id} className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">
                         {id.provider}
                       </span>
@@ -93,7 +94,8 @@ export default async function UsersPage() {
                   </div>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="text-sm text-gray-900 font-mono">осталось {user.tokenBalance.toLocaleString('ru-RU')}</div>
+                  {user.budget && <div className="text-sm font-mono text-indigo-700">API ${(user.budget.balanceMicros / 1_000_000).toFixed(2)} {user.budget.enabled ? '' : '(пауза)'}</div>}
+                  <div className="text-sm text-gray-900 font-mono">токенов {user.tokenBalance.toLocaleString('ru-RU')}</div>
                   <div className="text-xs text-gray-500 font-mono">потрачено {spent.toLocaleString('ru-RU')}</div>
                   <div className="text-xs text-gray-500 font-mono">выделено {(user.tokenBalance + spent).toLocaleString('ru-RU')}</div>
                   <Link href={`/admin/users/${user.id}`} className="text-xs text-indigo-600 hover:text-indigo-800">модели</Link>
