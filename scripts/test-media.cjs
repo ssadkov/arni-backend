@@ -4,12 +4,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
-let routerCalls = 0, routerBody;
+let routerCalls = 0, routerBody, routerMode = 'success';
 global.fetch = async (url, options) => {
 	if (String(url).includes('/chat/completions')) {
 		routerCalls++; routerBody = JSON.parse(options.body);
+		if (routerMode === 'limited' && routerBody.model === 'test/vision:free') { return Response.json({ error: 'shared pool busy' }, { status: 429 }); }
 		return Response.json({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, cost: routerBody.model.endsWith(':free') ? 0 : 0.00005 } });
 	}
+	if (String(url).endsWith('/endpoints')) { return Response.json({ data: { endpoints: [{ provider_name: 'Test', status: 0, uptime_last_30m: 100 }] } }); }
 	return Response.json({ data: require('./fixtures/router-models.cjs') });
 };
 const db = process.env.ARNI_TEST_DATABASE_URL;
@@ -110,6 +112,14 @@ async function main() {
 		await prisma.accountBudget.update({ where: { userId }, data: { enabled: true, balanceMicros: 2_000_000, validUntil: new Date(Date.now() + 86400_000) } });
 		const paid = await post(request('test/paid')); assert.equal(paid.status, 200); await paid.json();
 		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 1_999_950);
+		routerMode = 'limited';
+		const beforeSteps = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).freeStepsTotal;
+		const fallback = await post(request('test/vision:free')); assert.equal(fallback.status, 200); await fallback.json();
+		assert.equal(routerBody.model, 'test:free');
+		assert.equal(routerBody.messages[0].content[1].image_url.url, imagePart.image_url.url);
+		assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).freeStepsTotal, beforeSteps + 1);
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 1_999_950);
+		routerMode = 'success';
 		const publicList = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models'));
 		assert.ok((await publicList.json()).data.every(row => row.id.endsWith(':free')));
 	});

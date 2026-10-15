@@ -24,4 +24,5 @@ assert.equal(validUsage({ prompt_tokens: 100, completion_tokens: 10, prompt_toke
 assert.equal(zeroPrice({ id: 'fake/model:free', pricing: { prompt: '1', completion: '0' } }), false);
 const routed = chooseRoutedModel('broken/vision:free', new Map([['broken/vision:free', 'red'], ['text:free', 'green'], ['vision:free', 'green']]), ['vision:free']);
 assert.equal(routed.model, 'vision:free');
+assert.equal(chooseRoutedModel('broken/vision:free', new Map([['broken/vision:free', 'red'], ['vision:free', 'unknown']]), ['vision:free']).model, 'vision:free');
 console.log('PASS explicit cache markers, provider-specific capability, cache usage normalization, zero-price validation and vision-safe fallback');

@@ -31,7 +31,7 @@ export async function completeWithOpenRouter(body: unknown): Promise<Response> {
 			'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'https://arni-code.com',
 			'X-Title': 'Arni Code IDE',
 		},
-        body: JSON.stringify(cachedRouterBody(body)),
+		body: JSON.stringify(cachedRouterBody(body)),
 	});
 
 	const headers = new Headers(response.headers);

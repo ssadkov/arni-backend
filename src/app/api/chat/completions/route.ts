@@ -218,7 +218,7 @@ export async function POST(req: NextRequest) {
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.
-    if (isFreeModel && (response.status === 502 || response.status === 503)) {
+    if (isFreeModel && [429, 502, 503].includes(response.status)) {
       const failedModel = trackedModel;
       const errorText = await response.text();
       await track(response.status, errorText, failedModel);

@@ -249,7 +249,7 @@ export function chooseRoutedModel(requested: string, lights: ReadonlyMap<string,
 	const healthy = candidates.find(model => {
 		const light = lights.get(model);
 		return model !== requested && (light === 'green' || light === 'yellow');
-	});
+	}) ?? candidates.find(model => model !== requested && lights.get(model) === 'unknown');
 	return healthy
 		? { model: healthy, routedFrom: requested }
 		: { model: requested, routedFrom: null };
