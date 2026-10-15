@@ -14,6 +14,8 @@ $taskSavedEnvironment = @{}
 foreach ($taskName in $taskEnvironmentNames) { $taskSavedEnvironment[$taskName] = [Environment]::GetEnvironmentVariable($taskName, 'Process') }
 Push-Location $taskRepo
 try {
+	node scripts/test-bedrock-converse.cjs
+	if ($LASTEXITCODE -ne 0) { throw 'Bedrock conversion checks failed' }
 	& "$taskPgBin\initdb.exe" -D $taskCluster -U arni_budget_test --auth=trust --no-locale --encoding=UTF8 --no-sync
 	if ($LASTEXITCODE -ne 0) { throw 'initdb failed' }
 	# WaitForExit waits for pg_ctl, while Start-Process -Wait also waits for the server descendants.

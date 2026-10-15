@@ -70,6 +70,9 @@ function textOf(content: unknown): string {
 }
 
 function pushMessage(messages: Message[], role: 'user' | 'assistant', blocks: ContentBlock[]) {
+	if (blocks.length === 0) {
+		return;
+	}
 	const last = messages[messages.length - 1];
 	if (last && last.role === role) {
 		last.content = [...(last.content ?? []), ...blocks];
@@ -79,11 +82,17 @@ function pushMessage(messages: Message[], role: 'user' | 'assistant', blocks: Co
 }
 
 function contentBlocks(content: unknown): ContentBlock[] {
-	if (!Array.isArray(content)) { return [{ text: textOf(content) || ' ' }]; }
-	return content.map(part => {
-		if (part?.type !== 'image_url') { return { text: textOf([part]) || ' ' }; }
+	if (!Array.isArray(content)) {
+		const text = textOf(content);
+		return text.trim() ? [{ text }] : [];
+	}
+	return content.flatMap<ContentBlock>(part => {
+		if (part?.type !== 'image_url') {
+			const text = textOf([part]);
+			return text.trim() ? [{ text }] : [];
+		}
 		const { format, bytes } = decodeScreenshot(part.image_url?.url);
-		return { image: { format, source: { bytes } } };
+		return [{ image: { format, source: { bytes } } }];
 	});
 }
 
@@ -95,17 +104,18 @@ export function toConverse(body: ChatBody): { system: { text: string }[]; messag
 	for (const message of body.messages ?? []) {
 		if (message.role === 'system') {
 			const text = textOf(message.content);
-			if (text) {
+			if (text.trim()) {
 				system.push({ text });
 			}
 			continue;
 		}
 
 		if (message.role === 'tool') {
+			const blocks = contentBlocks(message.content);
 			pushMessage(messages, 'user', [{
 				toolResult: {
 					toolUseId: message.tool_call_id || 'tool',
-					content: contentBlocks(message.content) as never,
+					content: (blocks.length > 0 ? blocks : [{ text: 'Tool returned no text output.' }]) as never,
 				},
 			}]);
 			continue;
@@ -114,7 +124,7 @@ export function toConverse(body: ChatBody): { system: { text: string }[]; messag
 		if (message.role === 'assistant') {
 			const blocks: ContentBlock[] = [];
 			const text = textOf(message.content);
-			if (text) {
+			if (text.trim()) {
 				blocks.push({ text });
 			}
 			for (const call of message.tool_calls ?? []) {
@@ -135,7 +145,7 @@ export function toConverse(body: ChatBody): { system: { text: string }[]; messag
 					},
 				});
 			}
-			pushMessage(messages, 'assistant', blocks.length > 0 ? blocks : [{ text: ' ' }]);
+			pushMessage(messages, 'assistant', blocks);
 			continue;
 		}
 
@@ -143,10 +153,10 @@ export function toConverse(body: ChatBody): { system: { text: string }[]; messag
 	}
 
 	if (messages[0]?.role === 'assistant') {
-		messages.unshift({ role: 'user', content: [{ text: ' ' }] });
+		messages.unshift({ role: 'user', content: [{ text: 'Continue.' }] });
 	}
 	if (messages.length === 0) {
-		messages.push({ role: 'user', content: [{ text: ' ' }] });
+		throw new BudgetError('invalid_messages', 'Добавьте текст сообщения или изображение.', 400);
 	}
 
 	const tools: Tool[] = (body.tools ?? [])
