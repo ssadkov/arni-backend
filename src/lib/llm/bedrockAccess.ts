@@ -56,10 +56,15 @@ export async function modelsAllowedForUser(userId: string) {
 		.sort((a, b) => (a.outputPerMillion ?? Number.POSITIVE_INFINITY) - (b.outputPerMillion ?? Number.POSITIVE_INFINITY));
 }
 
-export async function modelIdForUser(userId: string, preferred: string | null) {
+export async function modelIdForUser(userId: string, preferred: string | null, requested?: string) {
 	const allowed = await modelsAllowedForUser(userId);
 	if (allowed.length === 0) {
 		return null;
+	}
+	// Old editors send an OpenRouter ID; use the account default until they refresh.
+	// Explicit Bedrock IDs must be allowed instead of silently using another model.
+	if (requested && !requested.includes('/') && !requested.endsWith(':free')) {
+		return allowed.find((model) => model.id === requested)?.id || null;
 	}
 	return allowed.find((model) => model.id === preferred)?.id || allowed[0].id;
 }

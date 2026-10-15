@@ -32,7 +32,9 @@ model User {
   identities    Identity[]
   usageLogs     UsageLog[]
   modelRequests ModelRequest[]
+  mediaGenerations MediaGeneration[]
   modelAccess   UserModelAccess[]
+  budget        AccountBudget?
 }
 
 model Identity {
@@ -53,6 +55,11 @@ model ModelRequest {
   id         String   @id @default(uuid())
   userId     String
   model      String
+  requestId  String?
+  requestedModel String?
+  operation  String @default("chat")
+  source     String?
+  region     String?
   statusCode Int
   durationMs Int
   error      String?
@@ -64,6 +71,7 @@ model ModelRequest {
 
   @@index([createdAt])
   @@index([model, createdAt])
+  @@index([requestId])
   @@index([userId, createdAt])
 }
 
@@ -75,9 +83,99 @@ model UsageLog {
   completionTokens Int
   // bedrock или openrouter. Старые строки без источника узнаём по id модели.
   source           String?
+  costMicros       Int?
+  accounting       String? // reported, estimated, or legacy
+  costBasis        String? // provider, catalog, reservation; separate from legacy token-balance accounting
+  requestId        String? @unique
+  requestedModel   String?
+  operation        String @default("chat")
+  region           String?
+  inputPerMillion  Float?
+  outputPerMillion Float?
+  unitPriceMicros  Int?
+  imageCount       Int @default(0)
   createdAt        DateTime @default(now())
 
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// USD micro-units (1 USD = 1,000,000). No conversion of historical tokens to money.
+model AccountBudget {
+  userId             String   @id
+  enabled            Boolean  @default(true)
+  balanceMicros      Int      @default(0)
+  validUntil         DateTime
+  fiveHourLimitMicros Int     @default(2000000)
+  weeklyLimitMicros   Int     @default(5000000)
+  fiveHourRequestLimit Int    @default(150)
+  weeklyRequestLimit Int     @default(1000)
+  fiveHourStartedAt  DateTime?
+  weeklyStartedAt    DateTime?
+  fiveHourUsedMicros Int      @default(0)
+  weeklyUsedMicros   Int      @default(0)
+  fiveHourRequests   Int      @default(0)
+  weeklyRequests     Int      @default(0)
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  entries           BudgetEntry[]
+  reservations      BudgetReservation[]
+}
+
+model BudgetEntry {
+  id           String   @id @default(uuid())
+  userId       String
+  key          String   @unique // grant/payment/request idempotency key
+  amountMicros Int
+  kind         String   // grant, reserve, refund, adjustment; future payment/subscription
+  note         String
+  payloadHash  String?
+  createdAt    DateTime @default(now())
+  budget       AccountBudget @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  @@index([userId, createdAt])
+}
+
+model BudgetReservation {
+  id              String   @id @default(uuid())
+  userId          String
+  model           String
+  source          String
+  reservedMicros  Int
+  inputPerMillion Float
+  outputPerMillion Float
+  requestId       String? @unique
+  requestedModel  String?
+  operation       String @default("chat")
+  region          String?
+  unitPriceMicros Int?
+  imageCount      Int @default(0)
+  status          String   @default("pending") // reported, estimated, refunded
+  costMicros      Int?
+  promptTokens    Int?
+  completionTokens Int?
+  fiveHourStartedAt DateTime
+  weeklyStartedAt DateTime
+  createdAt       DateTime @default(now())
+  budget          AccountBudget @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  @@index([userId, status])
+}
+
+// Private results allow safe replay without calling a billed model again. Prompts are not stored.
+model MediaGeneration {
+  id            String @id @default(uuid())
+  userId        String
+  requestKey    String
+  payloadHash   String
+  model         String
+  region        String
+  status        String @default("pending")
+  reservationId String? @unique
+  image         Bytes?
+  mimeType      String?
+  seed          String?
+  errorCode     String?
+  createdAt     DateTime @default(now())
+  user          User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@unique([userId, requestKey])
+  @@index([userId, createdAt])
 }
 
 // Каталог Bedrock. enabled — доступна ли модель всем, у кого нет личного исключения.

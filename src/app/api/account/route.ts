@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { decryptJWT } from '@/lib/jwt';
 import prisma from '@/lib/prisma';
 import { accountPayload } from '@/lib/freeSteps';
+import { budgetSnapshot } from '@/lib/budget';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,5 +28,8 @@ export async function GET(req: NextRequest) {
 		return NextResponse.json({ error: 'Account is blocked' }, { status: 403 });
 	}
 
-	return NextResponse.json({ user: accountPayload(user) });
+	const budget = await prisma.accountBudget.findUnique({ where: { userId } });
+	return NextResponse.json({ user: { ...accountPayload(user), budget: budget ? budgetSnapshot(budget) : null } }, {
+		headers: { 'Cache-Control': 'no-store' },
+	});
 }
