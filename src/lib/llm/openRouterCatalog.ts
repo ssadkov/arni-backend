@@ -38,7 +38,9 @@ export async function routerModel(id: string, images = false): Promise<RouterMod
 /** Cache controls are provider-specific; never send them to unverified Qwen snapshots. */
 export function routerCacheMode(id: string): 'explicit' | 'automatic' | undefined {
 	if (id.endsWith(':free')) { return undefined; }
-	if (id.startsWith('anthropic/claude-') || ['deepseek/deepseek-v3.2', 'qwen/qwen3-max', 'qwen/qwen-plus', 'qwen/qwen3.6-plus', 'qwen/qwen3-coder-plus', 'qwen/qwen3-coder-flash'].includes(id)) { return 'explicit'; }
-	if (id.startsWith('openai/') || id.startsWith('google/gemini-')) { return 'automatic'; }
+	if (['anthropic/claude-haiku-4.5', 'anthropic/claude-sonnet-4.5', 'anthropic/claude-sonnet-4.6', 'anthropic/claude-opus-4.5', 'anthropic/claude-opus-4.6',
+		'deepseek/deepseek-v3.2', 'qwen/qwen3-max', 'qwen/qwen-plus', 'qwen/qwen3.6-plus', 'qwen/qwen3-coder-plus', 'qwen/qwen3-coder-flash'].includes(id)) { return 'explicit'; }
+	if (/^openai\/(?:gpt-(?:4o|4\.1|[56])|o[134](?:-|$))/.test(id)
+		|| ['google/gemini-2.5-flash-lite', 'google/gemini-2.5-flash', 'google/gemini-2.5-pro'].includes(id)) { return 'automatic'; }
 	return undefined;
 }

@@ -18,6 +18,8 @@ assert.deepEqual(cached.messages.slice(1), original.messages.slice(1));
 assert.equal(cachedRouterBody({ ...original, model: 'qwen/qwen3-vl-235b-a22b-instruct' }).messages, original.messages);
 assert.equal(routerCacheMode('qwen/qwen3.5-flash-02-23'), undefined);
 assert.equal(routerCacheMode('google/gemini-2.5-flash-lite'), 'automatic');
+assert.equal(routerCacheMode('anthropic/claude-3-haiku'), undefined);
+assert.equal(routerCacheMode('anthropic/claude-haiku-4.5'), 'explicit');
 assert.equal(validUsage({ prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 20, cache_write_tokens: 30 } }).prompt_tokens_details.cache_creation_input_tokens, 30);
 assert.equal(zeroPrice({ id: 'fake/model:free', pricing: { prompt: '1', completion: '0' } }), false);
 const routed = chooseRoutedModel('broken/vision:free', new Map([['broken/vision:free', 'red'], ['text:free', 'green'], ['vision:free', 'green']]), ['vision:free']);
