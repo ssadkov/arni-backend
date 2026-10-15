@@ -1,4 +1,4 @@
-type ReleaseAsset = { name: string; browser_download_url: string; digest?: string | null };
+type ReleaseAsset = { name: string; browser_download_url: string; digest?: string | null; size?: number };
 export type MacRelease = { draft: boolean; prerelease: boolean; published_at: string; body?: string | null; assets: ReleaseAsset[] };
 export type MacUpdateManifest = { version: string; commit: string; assetName: string; sha256: string; signed: boolean; notarized: boolean };
 
@@ -14,13 +14,16 @@ function newer(version: string, current: string): boolean {
 /** Only stable, explicitly notarized artifacts from the product repository enter the feed. */
 export function macUpdate(release: MacRelease, manifest: MacUpdateManifest, arch: string, commit: string, currentVersion: string) {
 	if (release.draft || release.prerelease || !manifest.signed || !manifest.notarized
-		|| !/^[a-f0-9]{40}$/.test(manifest.commit) || manifest.commit === commit
+		|| !/^[a-f0-9]{40}$/.test(manifest.commit) || !/^[a-f0-9]{40}$/.test(commit)
 		|| !/^[a-f0-9]{64}$/.test(manifest.sha256) || !newer(manifest.version, currentVersion)
 		|| manifest.assetName !== `ArniCode-darwin-${arch}.zip`) { return null; }
 	const asset = release.assets.find(asset => asset.name === manifest.assetName);
 	if (!asset || !asset.browser_download_url.startsWith('https://github.com/ssadkov/arni-code/releases/download/')
 		|| (asset.digest && asset.digest !== `sha256:${manifest.sha256}`)) { return null; }
+	// DarwinUpdateService maps Electron's releaseNotes event argument to update.version.
+	// The download action can request the pending commit while the running version is older.
 	return { url: asset.browser_download_url, name: manifest.version, version: manifest.commit,
-		productVersion: manifest.version, notes: release.body || '', pub_date: release.published_at,
-		timestamp: Date.parse(release.published_at), sha256hash: manifest.sha256 };
+		productVersion: manifest.version, notes: manifest.commit, releaseNotes: release.body || '', pub_date: release.published_at,
+		timestamp: Date.parse(release.published_at), sha256hash: manifest.sha256, sha256: manifest.sha256,
+		size: Number.isSafeInteger(asset.size) && asset.size! > 0 ? asset.size : undefined };
 }

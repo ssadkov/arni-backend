@@ -56,9 +56,16 @@ async function check(name, run) { await run(); passed++; console.log(`PASS ${nam
 async function main() {
  await check('Mac update feed refuses unsigned, mismatched, old and prerelease artifacts', () => {
   const {macUpdate}=require('../src/lib/macUpdates.ts');
-  const release={draft:false,prerelease:false,published_at:'2026-10-15T12:00:00Z',assets:[{name:'ArniCode-darwin-arm64.zip',browser_download_url:'https://github.com/ssadkov/arni-code/releases/download/v1.0.1/ArniCode-darwin-arm64.zip',digest:'sha256:'+'a'.repeat(64)}]};
+  const release={draft:false,prerelease:false,published_at:'2026-10-15T12:00:00Z',body:'Release description',assets:[{name:'ArniCode-darwin-arm64.zip',browser_download_url:'https://github.com/ssadkov/arni-code/releases/download/v1.0.1/ArniCode-darwin-arm64.zip',digest:'sha256:'+'a'.repeat(64),size:12345}]};
   const manifest={version:'1.0.1',commit:'a'.repeat(40),assetName:'ArniCode-darwin-arm64.zip',sha256:'a'.repeat(64),signed:true,notarized:true};
-  assert.equal(macUpdate(release,manifest,'arm64','b'.repeat(40),'1.0.0').productVersion,'1.0.1');
+  const update=macUpdate(release,manifest,'arm64','b'.repeat(40),'1.0.0');
+  assert.equal(update.productVersion,'1.0.1');
+  assert.equal(update.notes,manifest.commit,'Electron releaseNotes must preserve the pending commit');
+  assert.equal(update.releaseNotes,release.body);
+  assert.equal(update.sha256,manifest.sha256);
+  assert.equal(update.size,12345);
+  assert.equal(macUpdate(release,manifest,'arm64',manifest.commit,'1.0.0').url,update.url,'Manual download requests use the pending commit with the old running version');
+  assert.equal(macUpdate(release,manifest,'arm64',manifest.commit,'1.0.1'),null,'The installed version must not download itself');
   for (const [r,m,arch,current] of [[release,{...manifest,signed:false},'arm64','1.0.0'],[{...release,prerelease:true},manifest,'arm64','1.0.0'],[release,{...manifest,sha256:'b'.repeat(64)},'arm64','1.0.0'],[release,manifest,'x64','1.0.0'],[release,manifest,'arm64','1.0.1'],[release,manifest,'arm64','1.0.2']]) assert.equal(macUpdate(r,m,arch,'b'.repeat(40),current),null);
  });
  await check('cache usage preserves full input count, discounted reads and write premium', () => {
