@@ -13,7 +13,9 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
 }).outputText, filename);
 
 const runtime = require('@aws-sdk/client-bedrock-runtime');
-const { toConverse, completeWithBedrock } = require('../src/lib/llm/bedrock.ts');
+const { toConverse, completeWithBedrock, cacheConversePrefix, bedrockUsage } = require('../src/lib/llm/bedrock.ts');
+const { modelCapabilities, managedModelMetadata, QWEN3_MODEL_IDS } = require('../src/lib/llm/modelCapabilities.ts');
+const { supportsScreenshots, conservativeInputTokenBound } = require('../src/lib/llm/vision.ts');
 const model = 'us.anthropic.claude-sonnet-4-6';
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNGkAAAAASUVORK5CYII=';
 const image = { type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } };
@@ -52,6 +54,42 @@ function assertValidText(input) {
 let passed = 0;
 async function check(name, run) { await run(); passed++; console.log(`PASS ${name}`); }
 async function main() {
+ await check('Mac update feed refuses unsigned, mismatched, old and prerelease artifacts', () => {
+  const {macUpdate}=require('../src/lib/macUpdates.ts');
+  const release={draft:false,prerelease:false,published_at:'2026-10-15T12:00:00Z',assets:[{name:'ArniCode-darwin-arm64.zip',browser_download_url:'https://github.com/ssadkov/arni-code/releases/download/v1.0.1/ArniCode-darwin-arm64.zip',digest:'sha256:'+'a'.repeat(64)}]};
+  const manifest={version:'1.0.1',commit:'a'.repeat(40),assetName:'ArniCode-darwin-arm64.zip',sha256:'a'.repeat(64),signed:true,notarized:true};
+  assert.equal(macUpdate(release,manifest,'arm64','b'.repeat(40),'1.0.0').productVersion,'1.0.1');
+  for (const [r,m,arch,current] of [[release,{...manifest,signed:false},'arm64','1.0.0'],[{...release,prerelease:true},manifest,'arm64','1.0.0'],[release,{...manifest,sha256:'b'.repeat(64)},'arm64','1.0.0'],[release,manifest,'x64','1.0.0'],[release,manifest,'arm64','1.0.1'],[release,manifest,'arm64','1.0.2']]) assert.equal(macUpdate(r,m,arch,'b'.repeat(40),current),null);
+ });
+ await check('cache usage preserves full input count, discounted reads and write premium', () => {
+  const usage=bedrockUsage(model,{inputTokens:1000,outputTokens:100,cacheReadInputTokens:8000,cacheWriteInputTokens:1000},{inputPerMillion:3,outputPerMillion:15});
+  assert.deepEqual(usage,{prompt_tokens:10000,completion_tokens:100,total_tokens:10100,prompt_tokens_details:{cached_tokens:8000,cache_creation_input_tokens:1000},cost:0.01065});
+ });
+ await check('rolling cache checkpoints preserve tool pairs without mutating requests or touching Qwen', () => {
+  const messages=toConverse({messages:[{role:'user',content:'Reference '.repeat(2500)},{role:'assistant',tool_calls:[call]},{role:'tool',tool_call_id:call.id,content:'saved'}]}).messages;
+  const before=JSON.stringify(messages); const cached=cacheConversePrefix(model,messages);
+  assert.equal(cached[1].content.at(-1).cachePoint.type,'default');
+  assertValidText({messages:cached}); assert.equal(JSON.stringify(messages),before);
+  assert.equal(cacheConversePrefix('qwen.qwen3-coder-next',messages),messages);
+ });
+	await check('model metadata carries real context, response reserve, vision and regional Qwen routing', () => {
+		assert.equal(QWEN3_MODEL_IDS.length, 7);
+		assert.equal(managedModelMetadata(model).context_length, 1_000_000);
+		assert.equal(managedModelMetadata(model).top_provider.max_completion_tokens, 4096);
+		assert.equal(modelCapabilities('us.anthropic.claude-haiku-4-5-20251001-v1:0').contextWindow, 200000);
+		assert.equal(modelCapabilities('qwen.qwen3-32b-v1:0').contextWindow, 32768);
+		assert.equal(modelCapabilities('qwen.qwen3-coder-480b-a35b-v1:0').region, 'us-west-2');
+		for (const id of QWEN3_MODEL_IDS) {
+			assert.equal(supportsScreenshots(id), id === 'qwen.qwen3-vl-235b-a22b');
+			assert.ok(managedModelMetadata(id).top_provider.max_completion_tokens < modelCapabilities(id).contextWindow);
+		}
+	});
+	await check('Qwen screenshot reservation counts image dimensions without charging base64 as text', () => {
+		const body = [{ role: 'user', content: [image] }];
+		const bound = conservativeInputTokenBound(body, []);
+		assert.ok(Number.isSafeInteger(bound) && bound > 2000 && bound < 3000);
+		assert.equal(body[0].content[0], image);
+	});
 	await check('interrupted parallel calls and summary histories receive explicit missing-result errors', () => {
 		for (const tail of [[], [{ role: 'user', content: 'Summarize the work.' }], [{ role: 'tool', tool_call_id: 'next', content: 'File saved.' }]]) {
 			const converted = toConverse({ messages: [{ role: 'user', content: 'Prepare a preview.' }, { role: 'assistant', tool_calls: [call, { ...call, id: 'next' }] }, ...tail] });

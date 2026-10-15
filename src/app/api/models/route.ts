@@ -4,7 +4,7 @@ import { decryptJWT } from '@/lib/jwt';
 import prisma from '@/lib/prisma';
 import { modelIdForUser, modelsAllowedForUser } from '@/lib/llm/bedrockAccess';
 import { resolveLlmProvider } from '@/lib/llm/provider';
-import { supportsScreenshots } from '@/lib/llm/vision';
+import { managedModelMetadata } from '@/lib/llm/modelCapabilities';
 
 // OpenRouter отклоняет запросы из РФ («Access denied by security policy»),
 // поэтому клиент берёт список моделей здесь, а не напрямую с openrouter.ai.
@@ -32,8 +32,9 @@ export async function GET(req: NextRequest) {
         const allowed = await modelsAllowedForUser(userId);
         const selected = await modelIdForUser(userId, user.bedrockModelId);
         return NextResponse.json({ arni_managed: true, data: allowed.filter(model => model.inputPerMillion != null && model.outputPerMillion != null).map(model => ({
-          id: model.id, name: model.name, arni_default: model.id === selected, supported_parameters: ['tools'], context_length: 32768,
-          top_provider: { context_length: 32768, max_completion_tokens: 4096 }, architecture: { input_modalities: supportsScreenshots(model.id) ? ['text', 'image'] : ['text'] },
+          id: model.id, name: model.name, arni_default: model.id === selected, supported_parameters: ['tools'],
+          ...managedModelMetadata(model.id),
+          pricing: { prompt: String(model.inputPerMillion! / 1_000_000), completion: String(model.outputPerMillion! / 1_000_000) },
         })) }, { headers: { 'Cache-Control': 'private, no-store' } });
       }
     }

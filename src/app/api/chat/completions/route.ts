@@ -20,7 +20,8 @@ import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
 import { validUsage, type ReportedUsage } from '@/lib/budgetPolicy';
 import { usageStream } from '@/lib/usageStream';
 import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
-import { costMicros } from '@/lib/budgetPolicy';
+import { usageCostMicros } from '@/lib/budgetPolicy';
+import { modelCapabilities } from '@/lib/llm/modelCapabilities';
 
 export const maxDuration = 300;
 
@@ -43,6 +44,8 @@ function freeLimitResponse(snapshot: FreeStepSnapshot) {
 export async function POST(req: NextRequest) {
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
+  const candidateChatId = req.headers.get('X-Arni-Chat-Id');
+  const chatId = candidateChatId && /^[a-zA-Z0-9:._/-]{1,200}$/.test(candidateChatId) ? candidateChatId : undefined;
   let reservedUserId: string | null = null;
   let trackedUserId: string | undefined;
   let trackedModel = 'unknown';
@@ -62,7 +65,7 @@ export async function POST(req: NextRequest) {
       durationMs: Date.now() - startedAt,
       error,
       routedFrom,
-      requestId, requestedModel, source: trackedSource, region: trackedSource === 'bedrock' ? process.env.AWS_REGION || 'us-east-1' : undefined,
+      requestId, requestedModel, source: trackedSource, region: trackedSource === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined,
     });
   };
   try {
@@ -196,14 +199,14 @@ export async function POST(req: NextRequest) {
       if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
       const price = await budgetPrice(body, provider, model);
       const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output,
-        { requestId, requestedModel, imageCount: images, region: provider === 'bedrock' ? process.env.AWS_REGION || 'us-east-1' : undefined });
+        { requestId, requestedModel, chatId, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined });
       budgetReservationId = reservation.id;
     }
     const catalogPrice = provider === 'bedrock' && forcedBedrockModel
       ? await prisma.bedrockModel.findUnique({ where: { id: forcedBedrockModel } }) : null;
     upstreamDispatched = true;
     let response = provider === 'bedrock'
-      ? await completeWithBedrock(body, forcedBedrockModel)
+      ? await completeWithBedrock(body, forcedBedrockModel, catalogPrice)
       : await completeWithOpenRouter(body);
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
@@ -263,9 +266,9 @@ export async function POST(req: NextRequest) {
       const completionTokens = usage.completion_tokens;
       const input = catalogPrice?.inputPerMillion; const output = catalogPrice?.outputPerMillion;
       const measuredCost = provider === 'openrouter' && usage.cost !== undefined ? Math.ceil(usage.cost * 1_000_000)
-        : isFreeModel ? 0 : input != null && output != null ? costMicros(promptTokens, completionTokens, input, output) : null;
-      const data = { userId: user.id, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: provider,
-        imageCount: images, region: provider === 'bedrock' ? process.env.AWS_REGION || 'us-east-1' : null,
+        : isFreeModel ? 0 : input != null && output != null ? usageCostMicros(usage, input, output, input * (modelCapabilities(servedModel).cache?.readMultiplier ?? 1), input * (modelCapabilities(servedModel).cache?.writeMultiplier ?? 1)) : null;
+      const data = { userId: user.id, chatId, cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0, cacheWriteTokens: usage.prompt_tokens_details?.cache_creation_input_tokens || 0, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: provider,
+        imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : null,
         inputPerMillion: input, outputPerMillion: output, costMicros: measuredCost,
         accounting: 'legacy', costBasis: measuredCost == null ? null : provider === 'openrouter' ? 'provider' : 'catalog' };
       if (isFreeModel) { await prisma.usageLog.create({ data }); }

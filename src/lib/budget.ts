@@ -1,6 +1,6 @@
 import type { AccountBudget, Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { costMicros, currentWindow, FIVE_HOURS_MS, WEEK_MS, type ReportedUsage } from './budgetPolicy';
+import { costMicros, usageCostMicros, currentWindow, FIVE_HOURS_MS, WEEK_MS, type ReportedUsage } from './budgetPolicy';
 
 export class BudgetError extends Error {
 	constructor(public readonly code: string, message: string, public readonly status = 429, public readonly resetsAt?: string) {
@@ -27,7 +27,8 @@ async function lockBudget(tx: Prisma.TransactionClient, userId: string) {
 	return tx.accountBudget.findUniqueOrThrow({ where: { userId } });
 }
 
-export type UsageMetadata = { requestId?: string; requestedModel?: string; operation?: 'chat' | 'image'; region?: string; unitPriceMicros?: number; imageCount?: number };
+export type UsageMetadata = { requestId?: string; requestedModel?: string; operation?: 'chat' | 'image'; region?: string; unitPriceMicros?: number; imageCount?: number;
+	chatId?: string; cacheReadPerMillion?: number; cacheWritePerMillion?: number };
 export async function reserveBudget(userId: string, model: string, source: string, reservedMicros: number, inputPerMillion: number, outputPerMillion: number, metadata: UsageMetadata = {}) {
 	if (!Number.isSafeInteger(reservedMicros) || reservedMicros < 0 || reservedMicros > 1_000_000_000
 		|| ![inputPerMillion, outputPerMillion].every(value => Number.isFinite(value) && value >= 0)) {
@@ -78,13 +79,16 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		const billedModel = reservation.source === 'openrouter' && reservation.model.endsWith(':free') && servedModel?.endsWith(':free')
 			? servedModel : reservation.model;
 		const calculated = reservation.operation === 'image' ? reservation.reservedMicros
-			: usage ? costMicros(usage.prompt_tokens, usage.completion_tokens, reservation.inputPerMillion, reservation.outputPerMillion) : reservation.reservedMicros;
+			: usage ? usageCostMicros(usage, reservation.inputPerMillion, reservation.outputPerMillion,
+				reservation.cacheReadPerMillion ?? reservation.inputPerMillion, reservation.cacheWritePerMillion ?? reservation.inputPerMillion) : reservation.reservedMicros;
 		// OpenRouter reports actual USD cost; Bedrock uses the snapshotted catalog rates.
 		const actual = rejected ? 0 : usage?.cost !== undefined && reservation.source === 'openrouter'
 			? costMicros(1, 0, usage.cost * 1_000_000, 0) : calculated;
 		const refund = reservation.reservedMicros - actual;
 		const status = rejected ? 'refunded' : usage ? 'reported' : 'estimated';
-		await tx.budgetReservation.update({ where: { id }, data: { model: billedModel, status, costMicros: actual, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens } });
+		const cacheUsage = { cacheReadTokens: usage?.prompt_tokens_details?.cached_tokens || 0,
+			cacheWriteTokens: usage?.prompt_tokens_details?.cache_creation_input_tokens || 0 };
+		await tx.budgetReservation.update({ where: { id }, data: { model: billedModel, status, costMicros: actual, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens, ...cacheUsage } });
 		await tx.accountBudget.update({ where: { userId: budget.userId }, data: {
 			balanceMicros: { increment: refund },
 			...(budget.fiveHourStartedAt?.getTime() === reservation.fiveHourStartedAt.getTime() ? {
@@ -103,6 +107,7 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 				costBasis: !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
 				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation, region: reservation.region,
 				inputPerMillion: reservation.inputPerMillion, outputPerMillion: reservation.outputPerMillion,
+				...cacheUsage, cacheReadPerMillion: reservation.cacheReadPerMillion, cacheWritePerMillion: reservation.cacheWritePerMillion, chatId: reservation.chatId,
 				unitPriceMicros: reservation.unitPriceMicros, imageCount: reservation.imageCount } });
 		}
 	});

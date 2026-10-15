@@ -18,7 +18,15 @@ export function costMicros(prompt: number, completion: number, inputPerMillion: 
 	return cost;
 }
 
-export type ReportedUsage = { prompt_tokens: number; completion_tokens: number; cost?: number };
+export type ReportedUsage = { prompt_tokens: number; completion_tokens: number; cost?: number;
+	prompt_tokens_details?: { cached_tokens: number; cache_creation_input_tokens: number } };
+
+/** Prompt tokens include all three input buckets; cached tokens must not be billed twice. */
+export function usageCostMicros(usage: ReportedUsage, input: number, output: number, cacheRead = input, cacheWrite = input): number {
+	const read = usage.prompt_tokens_details?.cached_tokens || 0;
+	const write = usage.prompt_tokens_details?.cache_creation_input_tokens || 0;
+	return costMicros(1, 0, (usage.prompt_tokens - read - write) * input + usage.completion_tokens * output + read * cacheRead + write * cacheWrite, 0);
+}
 
 export function validUsage(value: unknown): ReportedUsage | null {
 	if (!value || typeof value !== 'object' || !('prompt_tokens' in value) || !('completion_tokens' in value)) {
@@ -30,7 +38,12 @@ export function validUsage(value: unknown): ReportedUsage | null {
 	}
 	const cost = 'cost' in value && typeof value.cost === 'number' && Number.isFinite(value.cost) && value.cost >= 0
 		? value.cost : undefined;
-	return { prompt_tokens: Number(prompt), completion_tokens: Number(completion), cost };
+	const details = 'prompt_tokens_details' in value ? value.prompt_tokens_details as Record<string, unknown> | null : null;
+	const read = details?.cached_tokens ?? 0;
+	const write = details?.cache_creation_input_tokens ?? 0;
+	if (![read, write].every(count => Number.isSafeInteger(count) && Number(count) >= 0) || Number(read) + Number(write) > Number(prompt)) { return null; }
+	return { prompt_tokens: Number(prompt), completion_tokens: Number(completion), cost,
+		...(details ? { prompt_tokens_details: { cached_tokens: Number(read), cache_creation_input_tokens: Number(write) } } : {}) };
 }
 
 /** Incremental UTF-8/SSE parser: network chunks need not end on event boundaries. */

@@ -7,9 +7,14 @@ import {
 	type Message,
 	type Tool,
 	type ToolConfiguration,
+	type TokenUsage,
 } from '@aws-sdk/client-bedrock-runtime';
 import { decodeScreenshot, screenshotCount, supportsScreenshots } from './vision';
 import { BudgetError } from '@/lib/budget';
+import { modelCapabilities } from './modelCapabilities';
+import { usageCostMicros, type ReportedUsage } from '../budgetPolicy';
+
+type CatalogPrice = { inputPerMillion: number | null; outputPerMillion: number | null };
 
 type ChatToolCall = {
 	id?: string;
@@ -282,12 +287,16 @@ async function resolveModelId(requested: string | undefined): Promise<string> {
 }
 
 export function client(awsRegion = region(), maxAttempts = 3, tokenOverride?: string): BedrockRuntimeClient {
+	// Regional API keys are not interchangeable. Reuse the existing Oregon key
+	// until a dedicated text key is configured for that region.
+	const token = tokenOverride || (awsRegion === 'us-west-2'
+		? process.env.AWS_BEARER_TOKEN_BEDROCK_US_WEST_2?.trim() || process.env.AWS_BEARER_TOKEN_BEDROCK_IMAGES?.trim() : undefined);
 	// SigV4 стоит в списке схем раньше bearer. Явный приоритет нужен, чтобы
 	// использовался AWS_BEARER_TOKEN_BEDROCK, а не локальный AWS-профиль.
 	return new BedrockRuntimeClient({
 		region: awsRegion,
 		maxAttempts,
-		...(tokenOverride ? { token: { token: tokenOverride } } : {}),
+		...(token ? { token: { token } } : {}),
 		authSchemePreference: ['httpBearerAuth'],
 	});
 }
@@ -323,19 +332,37 @@ function chunk(model: string, delta: unknown, finish: string | null = null): unk
 	};
 }
 
-function usagePayload(model: string, input: number, output: number): unknown {
-	const promptTokens = input || 0;
-	const completionTokens = output || 0;
+export function bedrockUsage(model: string, usage: Partial<TokenUsage>, price?: CatalogPrice | null) {
+	const read = usage.cacheReadInputTokens || 0;
+	const write = usage.cacheWriteInputTokens || 0;
+	const prompt = (usage.inputTokens || 0) + read + write;
+	const output = usage.outputTokens || 0;
+	const result: ReportedUsage & { total_tokens: number } = { prompt_tokens: prompt, completion_tokens: output, total_tokens: prompt + output,
+		prompt_tokens_details: { cached_tokens: read, cache_creation_input_tokens: write } };
+	if (price?.inputPerMillion != null && price.outputPerMillion != null) {
+		const cache = modelCapabilities(model).cache;
+		result.cost = usageCostMicros(result, price.inputPerMillion, price.outputPerMillion,
+			price.inputPerMillion * (cache?.readMultiplier ?? 1), price.inputPerMillion * (cache?.writeMultiplier ?? 1)) / 1_000_000;
+	}
+	return result;
+}
+
+/** Rolling prefix checkpoints let subsequent tool steps reuse history without caching Qwen requests. */
+export function cacheConversePrefix(model: string, messages: Message[]): Message[] {
+	const cache = modelCapabilities(model).cache;
+	if (!cache || messages.length < 2 || Buffer.byteLength(JSON.stringify(messages)) < cache.minimumTokens * 4) { return messages; }
+	const prefixIndex = messages.length - 2;
+	return messages.map((message, index) => index === prefixIndex
+		? { ...message, content: [...(message.content || []), { cachePoint: { type: 'default' } }] } : message);
+}
+
+function usagePayload(model: string, usage: Partial<TokenUsage>, price?: CatalogPrice | null): unknown {
 	return {
 		id: 'chatcmpl-bedrock',
 		object: 'chat.completion.chunk',
 		model,
 		choices: [],
-		usage: {
-			prompt_tokens: promptTokens,
-			completion_tokens: completionTokens,
-			total_tokens: promptTokens + completionTokens,
-		},
+		usage: bedrockUsage(model, usage, price),
 	};
 }
 
@@ -343,6 +370,7 @@ function providerHeaders(modelId: string): Headers {
 	const headers = new Headers();
 	headers.set('X-Llm-Provider', 'bedrock');
 	headers.set('X-Llm-Model', modelId);
+	headers.set('X-Llm-Region', modelCapabilities(modelId).region || region());
 	return headers;
 }
 
@@ -353,7 +381,7 @@ function failure(error: unknown): Response {
 		{ status: error instanceof BudgetError ? error.status : awsStatus && awsStatus >= 400 && awsStatus < 500 ? awsStatus : 502 });
 }
 
-export async function completeWithBedrock(rawBody: unknown, forcedModelId?: string): Promise<Response> {
+export async function completeWithBedrock(rawBody: unknown, forcedModelId?: string, price?: CatalogPrice | null): Promise<Response> {
 	const body = (rawBody ?? {}) as ChatBody;
 	if (!bearerToken()) {
 		return Response.json({ error: 'AWS_BEARER_TOKEN_BEDROCK is not configured' }, { status: 500 });
@@ -362,7 +390,7 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 	try {
 		const modelId = forcedModelId || await resolveModelId(body.model);
 		if (screenshotCount((body.messages || []) as Array<Record<string, unknown>>) && !supportsScreenshots(modelId)) {
-			throw new BudgetError('vision_unavailable', 'Выберите Claude с поддержкой скриншотов.', 400);
+			throw new BudgetError('vision_unavailable', 'Выберите модель с поддержкой изображений, например Claude или Qwen3 VL.', 400);
 		}
 		const { system, messages, toolConfig } = toConverse(body);
 		const inferenceConfig = {
@@ -371,22 +399,22 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 		};
 		const input = {
 			modelId,
-			messages,
+			messages: price ? cacheConversePrefix(modelId, messages) : messages,
 			...(system.length > 0 ? { system } : {}),
 			...(toolConfig ? { toolConfig } : {}),
 			inferenceConfig,
 		};
 
 		if (body.stream) {
-			const response = await client().send(new ConverseStreamCommand(input));
+			const response = await client(modelCapabilities(modelId).region || region()).send(new ConverseStreamCommand(input));
 			const headers = providerHeaders(modelId);
 			headers.set('Content-Type', 'text/event-stream');
 			headers.set('Cache-Control', 'no-cache');
 			headers.set('Connection', 'keep-alive');
-			return new Response(openAIStream(response.stream, modelId), { headers });
+			return new Response(openAIStream(response.stream, modelId, price), { headers });
 		}
 
-		const response = await client().send(new ConverseCommand(input));
+		const response = await client(modelCapabilities(modelId).region || region()).send(new ConverseCommand(input));
 		const text = (response.output?.message?.content ?? [])
 			.map((block) => ('text' in block ? block.text : ''))
 			.filter(Boolean)
@@ -401,8 +429,6 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 					arguments: JSON.stringify(tool.input ?? {}),
 				},
 			}));
-		const promptTokens = response.usage?.inputTokens || 0;
-		const completionTokens = response.usage?.outputTokens || 0;
 		const headers = providerHeaders(modelId);
 		headers.set('Content-Type', 'application/json');
 		return new Response(JSON.stringify({
@@ -418,11 +444,7 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 				},
 				finish_reason: finishReason(response.stopReason),
 			}],
-			usage: {
-				prompt_tokens: promptTokens,
-				completion_tokens: completionTokens,
-				total_tokens: promptTokens + completionTokens,
-			},
+			usage: bedrockUsage(modelId, response.usage || {}, price),
 		}), { headers });
 	} catch (error) {
 		console.error('Bedrock converse failed:', error);
@@ -445,7 +467,7 @@ export async function countBedrockInput(body: ChatBody, modelId: string) {
 	}
 }
 
-function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: string): ReadableStream<Uint8Array> {
+function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: string, price?: CatalogPrice | null): ReadableStream<Uint8Array> {
 	return new ReadableStream({
 		async start(controller) {
 			let stop: string | undefined;
@@ -480,7 +502,7 @@ function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: strin
 					}
 					const usage = record.metadata?.usage;
 					if (usage) {
-						controller.enqueue(sse(usagePayload(modelId, usage.inputTokens || 0, usage.outputTokens || 0)));
+						controller.enqueue(sse(usagePayload(modelId, usage, price)));
 					}
 				}
 				controller.enqueue(sse(chunk(modelId, {}, finishReason(stop))));

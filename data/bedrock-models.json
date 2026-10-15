@@ -988,5 +988,82 @@
     "authorizationStatus": "AUTHORIZED",
     "regionAvailability": "AVAILABLE",
     "note": ""
+  },
+  {
+    "id": "qwen.qwen3-coder-next",
+    "name": "Qwen3 Coder Next",
+    "inputPerMillion": 0.5,
+    "outputPerMillion": 1.2,
+    "agreementStatus": "AVAILABLE",
+    "authorizationStatus": "AUTHORIZED",
+    "regionAvailability": "AVAILABLE",
+    "region": "us-east-1",
+    "note": "AWS Pricing API, Standard; runtime SKU preferred, verified 2026-10-15"
+  },
+  {
+    "id": "qwen.qwen3-next-80b-a3b",
+    "name": "Qwen3 Next 80B A3B",
+    "inputPerMillion": 0.14,
+    "outputPerMillion": 1.2,
+    "agreementStatus": "AVAILABLE",
+    "authorizationStatus": "AUTHORIZED",
+    "regionAvailability": "AVAILABLE",
+    "region": "us-east-1",
+    "note": "AWS Pricing API, Standard; runtime SKU preferred, verified 2026-10-15"
+  },
+  {
+    "id": "qwen.qwen3-32b-v1:0",
+    "name": "Qwen3 32B",
+    "inputPerMillion": 0.15,
+    "outputPerMillion": 0.6,
+    "agreementStatus": "AVAILABLE",
+    "authorizationStatus": "AUTHORIZED",
+    "regionAvailability": "AVAILABLE",
+    "region": "us-east-1",
+    "note": "AWS Pricing API, Standard; runtime SKU preferred, verified 2026-10-15"
+  },
+  {
+    "id": "qwen.qwen3-vl-235b-a22b",
+    "name": "Qwen3 VL 235B A22B",
+    "inputPerMillion": 0.53,
+    "outputPerMillion": 2.66,
+    "agreementStatus": "AVAILABLE",
+    "authorizationStatus": "AUTHORIZED",
+    "regionAvailability": "AVAILABLE",
+    "region": "us-east-1",
+    "note": "AWS Pricing API, Standard; runtime SKU preferred, verified 2026-10-15"
+  },
+  {
+    "id": "qwen.qwen3-coder-30b-a3b-v1:0",
+    "name": "Qwen3 Coder 30B A3B",
+    "inputPerMillion": 0.15,
+    "outputPerMillion": 0.6,
+    "agreementStatus": "AVAILABLE",
+    "authorizationStatus": "AUTHORIZED",
+    "regionAvailability": "AVAILABLE",
+    "region": "us-east-1",
+    "note": "AWS Pricing API, Standard; runtime SKU preferred, verified 2026-10-15"
+  },
+  {
+    "id": "qwen.qwen3-coder-480b-a35b-v1:0",
+    "name": "Qwen3 Coder 480B A35B",
+    "inputPerMillion": 0.45,
+    "outputPerMillion": 1.8,
+    "agreementStatus": "AVAILABLE",
+    "authorizationStatus": "AUTHORIZED",
+    "regionAvailability": "AVAILABLE",
+    "region": "us-west-2",
+    "note": "AWS Pricing API, Standard; runtime SKU preferred, verified 2026-10-15"
+  },
+  {
+    "id": "qwen.qwen3-235b-a22b-2507-v1:0",
+    "name": "Qwen3 235B A22B 2507",
+    "inputPerMillion": 0.22,
+    "outputPerMillion": 0.88,
+    "agreementStatus": "AVAILABLE",
+    "authorizationStatus": "AUTHORIZED",
+    "regionAvailability": "AVAILABLE",
+    "region": "us-west-2",
+    "note": "AWS Pricing API, Standard; runtime SKU preferred, verified 2026-10-15"
   }
 ]

@@ -1,7 +1,8 @@
 import prisma from '@/lib/prisma';
 import { BudgetError } from './budget';
 import { costMicros } from './budgetPolicy';
-import { screenshotCount, supportsScreenshots } from './llm/vision';
+import { screenshotCount, supportsScreenshots, conservativeInputTokenBound } from './llm/vision';
+import { modelCapabilities } from './llm/modelCapabilities';
 import { countBedrockInput } from './llm/bedrock';
 
 export type BudgetBody = {
@@ -60,9 +61,15 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 	}
 	// One token per UTF-8 byte plus protocol overhead: deliberately conservative reservation.
 	const images = screenshotCount(body.messages);
-	if (images && (source !== 'bedrock' || !supportsScreenshots(model))) { throw new BudgetError('vision_unavailable', 'Для скриншотов выберите Claude через Bedrock.', 400); }
-	const promptUpperBound = images ? await countBedrockInput(body, model)
-		: Buffer.byteLength(JSON.stringify({ messages: body.messages, tools: body.tools }), 'utf8') + 1024 + body.messages.length * 32;
-	if (promptUpperBound > 200_000) { throw new BudgetError('context_too_large', 'Уменьшите контекст: внутренний тест ограничивает размер запроса.', 400); }
-	return { input, output, reservedMicros: costMicros(promptUpperBound, body.max_tokens || 4096, input, output) };
+	if (images && (source !== 'bedrock' || !supportsScreenshots(model))) { throw new BudgetError('vision_unavailable', 'Выберите модель с поддержкой изображений, например Claude или Qwen3 VL.', 400); }
+	const promptUpperBound = images && model.includes('anthropic.') ? await countBedrockInput(body, model)
+		: conservativeInputTokenBound(body.messages, body.tools);
+	if (promptUpperBound > Math.max(200_000, modelCapabilities(model).contextWindow * 4)) {
+		throw new BudgetError('context_too_large', 'Запрос превышает предел размера для выбранной модели. Сожмите историю.', 400);
+	}
+	const cache = source === 'bedrock' ? modelCapabilities(model).cache : undefined;
+	const cacheReadPerMillion = input * (cache?.readMultiplier ?? 1);
+	const cacheWritePerMillion = input * (cache?.writeMultiplier ?? 1);
+	return { input, output, cacheReadPerMillion, cacheWritePerMillion,
+		reservedMicros: costMicros(promptUpperBound, body.max_tokens || 4096, Math.max(input, cacheWritePerMillion), output) };
 }

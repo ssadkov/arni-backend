@@ -1,8 +1,9 @@
 import { BudgetError } from '@/lib/budget';
+import { modelCapabilities } from './modelCapabilities';
 
 export const MAX_IMAGE_BYTES = 2_500_000;
 export const MAX_CHAT_BYTES = 3_800_000;
-export function supportsScreenshots(model: string) { return /anthropic\.claude-(?:3|sonnet-4|opus-4|haiku-4)/i.test(model); }
+export function supportsScreenshots(model: string) { return modelCapabilities(model).vision; }
 
 /** Accept embedded screenshots only; never fetch model-supplied URLs on the server. */
 export function decodeScreenshot(value: unknown) {
@@ -52,4 +53,17 @@ export function screenshotCount(messages: Array<Record<string, unknown>>) {
 	}
 	if (count > 20 || total > MAX_IMAGE_BYTES) { throw new BudgetError('images_too_large', 'Уменьшите число или размер скриншотов: всего до 2,5 МБ на запрос.', 400); }
 	return count;
+}
+
+/** Upper-bound unmerged vision patches for models without a CountTokens API. */
+export function conservativeInputTokenBound(messages: Array<Record<string, unknown>>, tools: unknown) {
+	let patches = 0;
+	const textMessages = messages.map(message => ({ ...message, content: Array.isArray(message.content)
+		? message.content.map(part => {
+			if (part?.type !== 'image_url') { return part; }
+			const { width, height } = decodeScreenshot(part.image_url?.url);
+			patches += Math.ceil(width / 14) * Math.ceil(height / 14) + 1024;
+			return { type: 'text', text: '[image]' };
+		}) : message.content }));
+	return Buffer.byteLength(JSON.stringify({ messages: textMessages, tools }), 'utf8') + 1024 + messages.length * 32 + patches;
 }

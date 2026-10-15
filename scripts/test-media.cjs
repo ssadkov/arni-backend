@@ -54,6 +54,13 @@ async function main() {
 		const result = await post(request(second)); assert.equal(result.status, 200); await result.json();
 		assert.equal(captured.modelId, second);
 		const log = await prisma.usageLog.findFirstOrThrow({ where: { userId, model: second } }); assert.equal(log.requestedModel, second); assert.equal(log.inputPerMillion, 1); assert.equal(log.costMicros, 35);
+		const usageEndpoint = require('../src/app/api/account/usage/route.ts').GET;
+		const usageResponse = await usageEndpoint(new NextRequest('http://localhost/api/account/usage', { headers }));
+		const ledger = await usageResponse.json();
+		assert.deepEqual([usageResponse.status, ledger.totalMicros, ledger.requestCount, ledger.requests[0].model], [200, 35, 1, second]);
+		assert.equal((await usageEndpoint(new NextRequest('http://localhost/api/account/usage'))).status, 401);
+		const isolated = await usageEndpoint(new NextRequest('http://localhost/api/account/usage?chatId=another-users-chat', { headers }));
+		assert.equal((await isolated.json()).requestCount, 0);
 		await prisma.userModelAccess.update({ where: { userId_modelId: { userId, modelId: second } }, data: { enabled: false } });
 		assert.equal((await post(request(second))).status, 403);
 		assert.equal((await post(request('us.unknown-model'))).status, 403);
@@ -64,7 +71,7 @@ async function main() {
 		assert.deepEqual(Buffer.from(converted.messages[0].content[1].image.source.bytes), Buffer.from(png, 'base64'));
 		assert.equal(converted.messages[2].content[0].toolResult.content[0].image.format, 'png');
 		const price = await budgetPrice(body, 'bedrock', model);
-		assert.equal(price.reservedMicros, 7500); assert.equal(countCalls, 1);
+		assert.equal(price.reservedMicros, 9000); assert.equal(countCalls, 1);
 		assert.equal(captured.modelId, model.replace('us.', ''));
 		mode = 'count-failed'; await assert.rejects(budgetPrice(body, 'bedrock', model), error => error.code === 'vision_count_unavailable'); mode = 'success';
 	});

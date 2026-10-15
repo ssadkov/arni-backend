@@ -97,6 +97,14 @@ model UsageLog {
   createdAt        DateTime @default(now())
 
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cacheReadTokens Int @default(0)
+  cacheWriteTokens Int @default(0)
+  cacheReadPerMillion Float?
+  cacheWritePerMillion Float?
+  chatId String?
+
+  @@index([userId, chatId])
+
 }
 
 // USD micro-units (1 USD = 1,000,000). No conversion of historical tokens to money.
@@ -156,6 +164,12 @@ model BudgetReservation {
   createdAt       DateTime @default(now())
   budget          AccountBudget @relation(fields: [userId], references: [userId], onDelete: Cascade)
   @@index([userId, status])
+  cacheReadTokens Int @default(0)
+  cacheWriteTokens Int @default(0)
+  cacheReadPerMillion Float?
+  cacheWritePerMillion Float?
+  chatId String?
+
 }
 
 // Private results allow safe replay without calling a billed model again. Prompts are not stored.
