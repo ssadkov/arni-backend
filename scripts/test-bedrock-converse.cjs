@@ -28,24 +28,47 @@ const history = [
 ];
 
 function assertValidText(input) {
+	let pending = new Set();
 	for (const block of input.system ?? []) { assert.ok(block.text.trim(), 'system text must not be blank'); }
 	for (const message of input.messages) {
 		assert.ok(message.content.length, 'message content must not be empty');
 		for (const block of message.content) {
+			if (block.toolUse) { pending.add(block.toolUse.toolUseId); }
 			if ('text' in block) { assert.ok(block.text.trim(), 'message text must not be blank'); }
 			if (block.toolResult) {
+				assert.equal(message.role, 'user');
+				assert.ok(pending.delete(block.toolResult.toolUseId), 'tool result must match an immediately preceding tool call');
 				assert.ok(block.toolResult.content.length, 'tool result must not be empty');
 				for (const result of block.toolResult.content) {
 					if ('text' in result) { assert.ok(result.text.trim(), 'tool result text must not be blank'); }
 				}
 			}
 		}
+		if (message.role === 'user') { assert.equal(pending.size, 0, 'every tool call needs a result before continuing'); }
 	}
+	assert.equal(pending.size, 0, 'history cannot end with unresolved tool calls');
 }
 
 let passed = 0;
 async function check(name, run) { await run(); passed++; console.log(`PASS ${name}`); }
 async function main() {
+	await check('interrupted parallel calls and summary histories receive explicit missing-result errors', () => {
+		for (const tail of [[], [{ role: 'user', content: 'Summarize the work.' }], [{ role: 'tool', tool_call_id: 'next', content: 'File saved.' }]]) {
+			const converted = toConverse({ messages: [{ role: 'user', content: 'Prepare a preview.' }, { role: 'assistant', tool_calls: [call, { ...call, id: 'next' }] }, ...tail] });
+			assertValidText(converted);
+			const results = converted.messages[2].content.filter(block => block.toolResult).map(block => block.toolResult);
+			assert.equal(results.length, 2);
+			assert.equal(results.find(result => result.toolUseId === call.id).status, 'error');
+			if (tail[0]?.role === 'tool') { assert.deepEqual(results.find(result => result.toolUseId === 'next').content, [{ text: 'File saved.' }]); }
+		}
+	});
+	await check('orphan and duplicate results retain text/images as ordinary historical context', () => {
+		const converted = toConverse({ messages: [{ role: 'tool', tool_call_id: 'old', content: ['Previous output.', image] }, { role: 'assistant', tool_calls: [call] }, { role: 'tool', tool_call_id: call.id, content: 'First result.' }, { role: 'tool', tool_call_id: call.id, content: 'Duplicate result.' }] });
+		assertValidText(converted);
+		assert.ok(converted.messages[0].content.some(block => block.image));
+		assert.ok(converted.messages[0].content.some(block => block.text === 'Previous output.'));
+		assert.ok(converted.messages[2].content.some(block => block.text === 'Duplicate result.'));
+	});
 	await check('agent history retains tool pairing and skips whitespace-only assistant/system blocks', () => {
 		const converted = toConverse({ messages: history });
 		assertValidText(converted);

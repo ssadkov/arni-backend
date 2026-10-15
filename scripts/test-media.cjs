@@ -59,10 +59,10 @@ async function main() {
 		assert.equal((await post(request('us.unknown-model'))).status, 403);
 	});
 	await check('screenshots survive managed sanitization and Converse user/tool conversion', async () => {
-		const body = managedBody({ model, messages: [{ role: 'user', content: [{ type: 'text', text: 'Match this landing' }, imagePart] }, { role: 'tool', tool_call_id: 'shot', content: [imagePart] }], max_tokens: 100 }, true);
+		const body = managedBody({ model, messages: [{ role: 'user', content: [{ type: 'text', text: 'Match this landing' }, imagePart] }, { role: 'assistant', content: null, tool_calls: [{ id: 'shot', function: { name: 'screenshot', arguments: '{}' } }] }, { role: 'tool', tool_call_id: 'shot', content: [imagePart] }], max_tokens: 100 }, true);
 		const converted = toConverse(body);
 		assert.deepEqual(Buffer.from(converted.messages[0].content[1].image.source.bytes), Buffer.from(png, 'base64'));
-		assert.equal(converted.messages[0].content[2].toolResult.content[0].image.format, 'png');
+		assert.equal(converted.messages[2].content[0].toolResult.content[0].image.format, 'png');
 		const price = await budgetPrice(body, 'bedrock', model);
 		assert.equal(price.reservedMicros, 7500); assert.equal(countCalls, 1);
 		assert.equal(captured.modelId, model.replace('us.', ''));

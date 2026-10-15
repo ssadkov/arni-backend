@@ -96,6 +96,49 @@ function contentBlocks(content: unknown): ContentBlock[] {
 	});
 }
 
+/** Recover protocol pairs removed by interrupted turns or history compaction. */
+function normalizeToolHistory(messages: Message[]): Message[] {
+	const normalized: Message[] = [];
+	const missingResult = (toolUseId: string): ContentBlock => ({ toolResult: {
+		toolUseId, status: 'error', content: [{ text: 'Tool result is missing from conversation history. Do not assume the tool succeeded.' }],
+	} });
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (message.role === 'assistant') {
+			pushMessage(normalized, 'assistant', message.content ?? []);
+			if (messages[index + 1]?.role === 'user') { continue; }
+		} else {
+			const previous = normalized.at(-1);
+			const expected = new Set(previous?.role === 'assistant'
+				? (previous.content ?? []).flatMap(block => block.toolUse?.toolUseId ? [block.toolUse.toolUseId] : []) : []);
+			const blocks: ContentBlock[] = [];
+			for (const block of message.content ?? []) {
+				if (!block.toolResult) { blocks.push(block); continue; }
+				if (block.toolResult.toolUseId && expected.delete(block.toolResult.toolUseId)) {
+					blocks.push(block);
+					continue;
+				}
+				// An orphan result is still useful context, but cannot be a protocol toolResult.
+				blocks.push({ text: `Historical tool output (${block.toolResult.toolUseId ?? 'unknown'}):` });
+				for (const output of block.toolResult.content ?? []) {
+					if (output.text?.trim()) { blocks.push({ text: output.text }); }
+					else if (output.image) { blocks.push({ image: output.image }); }
+				}
+			}
+			for (const toolUseId of expected) {
+				blocks.unshift(missingResult(toolUseId));
+			}
+			pushMessage(normalized, 'user', blocks);
+			continue;
+		}
+		const pending = (message.content ?? []).flatMap(block => block.toolUse?.toolUseId ? [block.toolUse.toolUseId] : []);
+		if (pending.length) {
+			pushMessage(normalized, 'user', pending.map(missingResult));
+		}
+	}
+	return normalized;
+}
+
 export function toConverse(body: ChatBody): { system: { text: string }[]; messages: Message[]; toolConfig?: ToolConfiguration } {
 	screenshotCount((body.messages || []) as Array<Record<string, unknown>>);
 	const system: { text: string }[] = [];
@@ -175,7 +218,7 @@ export function toConverse(body: ChatBody): { system: { text: string }[]; messag
 
 	return {
 		system,
-		messages,
+		messages: normalizeToolHistory(messages),
 		toolConfig: tools.length > 0 ? { tools } : undefined,
 	};
 }
