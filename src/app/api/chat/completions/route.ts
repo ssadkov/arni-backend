@@ -22,6 +22,7 @@ import { usageStream } from '@/lib/usageStream';
 import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
 import { usageCostMicros } from '@/lib/budgetPolicy';
 import { modelCapabilities } from '@/lib/llm/modelCapabilities';
+import { routerCatalog, routerModel, zeroPrice } from '@/lib/llm/openRouterCatalog';
 
 export const maxDuration = 300;
 
@@ -109,15 +110,20 @@ export async function POST(req: NextRequest) {
     } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }); }
     if (!body || typeof body !== 'object' || Array.isArray(body)) { return NextResponse.json({ error: 'Invalid request' }, { status: 400 }); }
     const budget = await prisma.accountBudget.findUnique({ where: { userId: user.id } });
-    const provider = resolveLlmProvider(user.llmProvider);
+    // Explicit catalog IDs determine the route; account preference only chooses a default.
+    const provider = typeof body.model === 'string' && (body.model.includes('/') || body.model.endsWith(':free')) ? 'openrouter' : resolveLlmProvider('BEDROCK');
     trackedSource = provider;
     requestedModel = typeof body.model === 'string' ? body.model.slice(0, 200) : 'unknown';
-    if (budget) { body = managedBody(body as BudgetBody, provider === 'bedrock'); }
+    body = managedBody(body as BudgetBody, true);
     if (budget && (typeof body.model !== 'string' || !body.model || body.model.length > 200)) {
       throw new BudgetError('invalid_model', 'Выберите модель.', 400);
     }
     const images = screenshotCount(body.messages || []);
     const isFreeModel = provider === 'openrouter' && typeof body.model === 'string' && body.model.endsWith(':free');
+    if (provider === 'openrouter') {
+      await routerModel(body.model, images > 0);
+      if (isFreeModel) { body.provider = { max_price: { prompt: 0, completion: 0, request: 0 }, require_parameters: true }; }
+    }
     trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
 
     // Платные модели OpenRouter — только в тарифе Pro. Пока его нет, клиент предлагает
@@ -165,7 +171,7 @@ export async function POST(req: NextRequest) {
     }
 
     let freeSteps: FreeStepSnapshot | null = null;
-    if (isFreeModel && !budget) {
+    if (isFreeModel) {
       freeSteps = await reserveFreeStep(user.id);
       if (!freeSteps) {
         const fresh = await prisma.user.findUnique({ where: { id: user.id } });
@@ -185,7 +191,8 @@ export async function POST(req: NextRequest) {
     // A red :free model is sent to the next green or yellow model in picker order.
     // Bedrock and paid models are left untouched.
     if (isFreeModel && typeof body.model === 'string') {
-      const routed = await routeFreeModel(body.model);
+      const candidates = (await routerCatalog()).filter(model => zeroPrice(model) && (!images || model.architecture?.input_modalities?.includes('image'))).map(model => model.id);
+      const routed = await routeFreeModel(body.model, candidates);
       if (routed.routedFrom) {
         routedFrom = routed.routedFrom;
         body.model = routed.model;
@@ -194,7 +201,7 @@ export async function POST(req: NextRequest) {
     }
 
     // 4. Выбранный провайдер. Ответ всегда в формате OpenAI, чтобы редактор не менялся.
-    if (budget) {
+    if (budget && !isFreeModel) {
       const model = forcedBedrockModel || body.model;
       if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
       const price = await budgetPrice(body, provider, model);
@@ -216,7 +223,8 @@ export async function POST(req: NextRequest) {
       const errorText = await response.text();
       await track(response.status, errorText, failedModel);
       rememberUnavailable(failedModel);
-      const routed = await routeFreeModel(failedModel);
+      const candidates = (await routerCatalog()).filter(model => zeroPrice(model) && (!images || model.architecture?.input_modalities?.includes('image'))).map(model => model.id);
+      const routed = await routeFreeModel(failedModel, candidates);
       if (routed.routedFrom && routed.model !== failedModel) {
         routedFrom = routed.routedFrom;
         body.model = routed.model;
@@ -261,16 +269,18 @@ export async function POST(req: NextRequest) {
         await settleBudget(budgetReservationId, usage, false, servedModel);
         return;
       }
-      if (!usage) { return; }
+      const missingUsage = !usage;
+      if (!usage && !isFreeModel) { return; }
+      usage ??= { prompt_tokens: 0, completion_tokens: 0 };
       const promptTokens = usage.prompt_tokens;
       const completionTokens = usage.completion_tokens;
       const input = catalogPrice?.inputPerMillion; const output = catalogPrice?.outputPerMillion;
-      const measuredCost = provider === 'openrouter' && usage.cost !== undefined ? Math.ceil(usage.cost * 1_000_000)
-        : isFreeModel ? 0 : input != null && output != null ? usageCostMicros(usage, input, output, input * (modelCapabilities(servedModel).cache?.readMultiplier ?? 1), input * (modelCapabilities(servedModel).cache?.writeMultiplier ?? 1)) : null;
+      const measuredCost = isFreeModel ? 0 : provider === 'openrouter' && usage.cost !== undefined ? Math.ceil(usage.cost * 1_000_000)
+        : input != null && output != null ? usageCostMicros(usage, input, output, input * (modelCapabilities(servedModel).cache?.readMultiplier ?? 1), input * (modelCapabilities(servedModel).cache?.writeMultiplier ?? 1)) : null;
       const data = { userId: user.id, chatId, cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0, cacheWriteTokens: usage.prompt_tokens_details?.cache_creation_input_tokens || 0, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: provider,
         imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : null,
         inputPerMillion: input, outputPerMillion: output, costMicros: measuredCost,
-        accounting: 'legacy', costBasis: measuredCost == null ? null : provider === 'openrouter' ? 'provider' : 'catalog' };
+        accounting: isFreeModel ? missingUsage ? 'estimated' : 'reported' : 'legacy', costBasis: measuredCost == null ? null : isFreeModel ? 'catalog' : provider === 'openrouter' ? 'provider' : 'catalog' };
       if (isFreeModel) { await prisma.usageLog.create({ data }); }
       else {
         await prisma.$transaction([

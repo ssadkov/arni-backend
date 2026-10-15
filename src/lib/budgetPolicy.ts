@@ -40,7 +40,7 @@ export function validUsage(value: unknown): ReportedUsage | null {
 		? value.cost : undefined;
 	const details = 'prompt_tokens_details' in value ? value.prompt_tokens_details as Record<string, unknown> | null : null;
 	const read = details?.cached_tokens ?? 0;
-	const write = details?.cache_creation_input_tokens ?? 0;
+	const write = details?.cache_creation_input_tokens ?? details?.cache_write_tokens ?? 0;
 	if (![read, write].every(count => Number.isSafeInteger(count) && Number(count) >= 0) || Number(read) + Number(write) > Number(prompt)) { return null; }
 	return { prompt_tokens: Number(prompt), completion_tokens: Number(completion), cost,
 		...(details ? { prompt_tokens_details: { cached_tokens: Number(read), cache_creation_input_tokens: Number(write) } } : {}) };

@@ -4,6 +4,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
+let routerCalls = 0, routerBody;
+global.fetch = async (url, options) => {
+	if (String(url).includes('/chat/completions')) {
+		routerCalls++; routerBody = JSON.parse(options.body);
+		return Response.json({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, cost: routerBody.model.endsWith(':free') ? 0 : 0.00005 } });
+	}
+	return Response.json({ data: require('./fixtures/router-models.cjs') });
+};
 const db = process.env.ARNI_TEST_DATABASE_URL;
 if (!db || !/^postgresql:\/\/[^@]+@127\.0\.0\.1:\d+\/arni_budget_test(?:\?|$)/.test(db)) { throw new Error('Disposable localhost database required'); }
 process.env.PRISMA_DATABASE_URL = db;
@@ -32,6 +40,7 @@ const { reserveBudget, settleBudget } = require('../src/lib/budget.ts');
 let userId, passed = 0;
 const check = async (name, run) => { await run(); console.log(`PASS ${name}`); passed++; };
 async function main() {
+	process.env.OPENROUTER_API_KEY = 'mock-only';
 	process.env.AWS_BEARER_TOKEN_BEDROCK = 'mock-only';
 	process.env.AWS_BEARER_TOKEN_BEDROCK_IMAGES = 'mock-images-only';
 	const user = await prisma.user.create({ data: { email: `media-${crypto.randomUUID()}@billing-test.invalid` } }); userId = user.id;
@@ -74,6 +83,35 @@ async function main() {
 		assert.equal(price.reservedMicros, 9000); assert.equal(countCalls, 1);
 		assert.equal(captured.modelId, model.replace('us.', ''));
 		mode = 'count-failed'; await assert.rejects(budgetPrice(body, 'bedrock', model), error => error.code === 'vision_count_unavailable'); mode = 'success';
+	});
+	await check('one account selects free vision and paid models without provider changes; expired budget cannot block free', async () => {
+		const { NextRequest } = require('next/server');
+		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
+		const headers = { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+		const list = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models', { headers }));
+		const models = (await list.json()).data;
+		assert.ok(models.some(row => row.id === model));
+		assert.ok(models.find(row => row.id === 'test/vision:free').architecture.input_modalities.includes('image'));
+		const post = require('../src/app/api/chat/completions/route.ts').POST;
+		const request = selected => new NextRequest('http://localhost/api/chat/completions', { method: 'POST', headers: { ...headers, 'X-Arni-Chat-Id': 'mixed-test' }, body: JSON.stringify({ model: selected, messages: [{ role: 'user', content: [{ type: 'text', text: 'Inspect frame' }, imagePart] }], max_tokens: 50 }) });
+		await prisma.accountBudget.update({ where: { userId }, data: { enabled: false, balanceMicros: 0, validUntil: new Date(0) } });
+		const free = await post(request('test/vision:free')); assert.equal(free.status, 200); await free.json();
+		assert.deepEqual(routerBody.provider.max_price, { prompt: 0, completion: 0, request: 0 });
+		assert.equal(routerBody.messages[0].content[1].image_url.url, imagePart.image_url.url);
+		const log = await prisma.usageLog.findFirstOrThrow({ where: { userId, chatId: 'mixed-test' } });
+		assert.deepEqual([log.model, log.imageCount, log.costMicros, log.accounting], ['test/vision:free', 1, 0, 'reported']);
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 0);
+		assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).llmProvider, 'BEDROCK');
+		const before = routerCalls;
+		assert.equal((await post(request('test/text:free'))).status, 400);
+		assert.equal((await post(request('fake/vision:free'))).status, 400);
+		assert.equal((await post(request('test/paid'))).status, 403);
+		assert.equal(routerCalls, before);
+		await prisma.accountBudget.update({ where: { userId }, data: { enabled: true, balanceMicros: 2_000_000, validUntil: new Date(Date.now() + 86400_000) } });
+		const paid = await post(request('test/paid')); assert.equal(paid.status, 200); await paid.json();
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 1_999_950);
+		const publicList = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models'));
+		assert.ok((await publicList.json()).data.every(row => row.id.endsWith(':free')));
 	});
 	await check('remote, malformed, oversized, wrong-role screenshots rejected', async () => {
 		for (const part of [{ type: 'image_url', image_url: { url: 'http://169.254.169.254/' } }, { type: 'image_url', image_url: { url: 'data:image/png;base64,YQ==' } }]) {

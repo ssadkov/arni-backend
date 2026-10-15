@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
+global.fetch = async () => Response.json({ data: require('./fixtures/router-models.cjs') });
 
 const db = process.env.ARNI_TEST_DATABASE_URL;
 if (!db || !/^postgresql:\/\/[^@]+@127\.0\.0\.1:\d+\/arni_budget_test(?:\?|$)/.test(db)) {
@@ -196,7 +197,7 @@ async function main() {
 		finally { Module._load = originalLoad; }
 		await prisma.bedrockModel.upsert({ where: { id: 'test-bedrock' }, update: {}, create: { id: 'test-bedrock', name: 'Test', inputPerMillion: 3, outputPerMillion: 15, enabled: true } });
 		await prisma.user.update({ where: { id: userId }, data: { llmProvider: 'BEDROCK', bedrockModelId: 'test-bedrock' } });
-		const request = stream => new NextRequest('http://localhost/api/chat/completions', { method: 'POST', headers: { Authorization: 'Bearer test', 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'test:free', messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }], stream, max_tokens: 10 }) });
+		const request = (stream, model = 'test-bedrock') => new NextRequest('http://localhost/api/chat/completions', { method: 'POST', headers: { Authorization: 'Bearer test', 'Content-Type': 'application/json' }, body: JSON.stringify({ model, messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }], stream, max_tokens: 10 }) });
 		const before = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
 		assert.equal((await chat(request(false))).status, 200);
 		mode = 'stream';
@@ -214,8 +215,9 @@ async function main() {
 		assert.equal(uncertain.costMicros, uncertain.reservedMicros);
 		await prisma.user.update({ where: { id: userId }, data: { llmProvider: 'OPENROUTER' } });
 		mode = 'json';
-		assert.equal((await chat(request(false))).status, 200);
+		assert.equal((await chat(request(false, 'test:free'))).status, 200);
 		await prisma.accountBudget.update({ where: { userId }, data: { enabled: false } });
+		assert.equal((await chat(request(false, 'test:free'))).status, 200, 'Free route survives disabled paid access');
 		const priorCalls = calls;
 		assert.equal((await chat(request(false))).status, 403);
 		assert.equal(calls, priorCalls);

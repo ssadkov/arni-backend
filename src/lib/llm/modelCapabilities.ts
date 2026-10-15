@@ -38,6 +38,7 @@ export function modelCapabilities(model: string): ModelCapabilities {
 export function managedModelMetadata(model: string) {
 	const capability = modelCapabilities(model);
 	return {
+		arni_cache: capability.cache ? 'explicit' : undefined,
 		context_length: capability.contextWindow,
 		arni_native_max_output_tokens: capability.maxOutputTokens,
 		top_provider: { context_length: capability.contextWindow,

@@ -85,7 +85,7 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		const actual = rejected ? 0 : usage?.cost !== undefined && reservation.source === 'openrouter'
 			? costMicros(1, 0, usage.cost * 1_000_000, 0) : calculated;
 		const refund = reservation.reservedMicros - actual;
-		const status = rejected ? 'refunded' : usage ? 'reported' : 'estimated';
+		const status = rejected ? 'refunded' : usage && (reservation.source !== 'openrouter' || usage.cost !== undefined) ? 'reported' : 'estimated';
 		const cacheUsage = { cacheReadTokens: usage?.prompt_tokens_details?.cached_tokens || 0,
 			cacheWriteTokens: usage?.prompt_tokens_details?.cache_creation_input_tokens || 0 };
 		await tx.budgetReservation.update({ where: { id }, data: { model: billedModel, status, costMicros: actual, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens, ...cacheUsage } });

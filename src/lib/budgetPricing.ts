@@ -4,6 +4,7 @@ import { costMicros } from './budgetPolicy';
 import { screenshotCount, supportsScreenshots, conservativeInputTokenBound } from './llm/vision';
 import { modelCapabilities } from './llm/modelCapabilities';
 import { countBedrockInput } from './llm/bedrock';
+import { routerModel, routerCacheMode } from './llm/openRouterCatalog';
 
 export type BudgetBody = {
 	model: string; messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>;
@@ -37,6 +38,8 @@ export function managedBody(body: BudgetBody, allowImages = false): BudgetBody {
 export async function budgetPrice(body: BudgetBody, source: string, model: string) {
 	let input = 0;
 	let output = 0;
+	let routerWriteRate = 0;
+	let routerReadRate: number | undefined;
 	if (source === 'bedrock') {
 		const row = await prisma.bedrockModel.findUnique({ where: { id: model } });
 		if (row?.inputPerMillion == null || row.outputPerMillion == null) {
@@ -45,15 +48,16 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 		input = row.inputPerMillion;
 		output = row.outputPerMillion;
 	} else if (!model.endsWith(':free')) {
-		const response = await fetch('https://openrouter.ai/api/v1/models', { cache: 'no-store' });
-		if (!response.ok) { throw new BudgetError('pricing_unavailable', 'Каталог цен API временно недоступен.', 503); }
-		const catalog = await response.json() as { data: Array<{ id: string; pricing?: { prompt?: string; completion?: string; request?: string } }> };
-		const price = catalog.data?.find(row => row.id === model)?.pricing;
+		const price = (await routerModel(model)).pricing;
 		if (!price || price.prompt == null || price.completion == null || Number(price.request || 0) !== 0) {
 			throw new BudgetError('pricing_unavailable', 'Модель не имеет поддерживаемого тарифа за токены.', 503);
 		}
-		input = Number(price.prompt) * 1_000_000;
-		output = Number(price.completion) * 1_000_000;
+		// Reserve the highest published tier and image-token rate. The provider's
+		// reported USD cost remains authoritative when settling the reservation.
+		input = Math.max(Number(price.prompt), Number(price.image || 0), ...(price.overrides || []).map(tier => Number(tier.prompt || price.prompt))) * 1_000_000;
+		output = Math.max(Number(price.completion), ...(price.overrides || []).map(tier => Number(tier.completion || price.completion))) * 1_000_000;
+		routerWriteRate = Math.max(Number(price.input_cache_write || 0), ...(price.overrides || []).map(tier => Number(tier.input_cache_write || 0))) * 1_000_000;
+		if (price.input_cache_read != null) { routerReadRate = Math.max(Number(price.input_cache_read), ...(price.overrides || []).map(tier => Number(tier.input_cache_read || price.input_cache_read))) * 1_000_000; }
 		body.provider = { max_price: { prompt: input, completion: output, request: 0 }, require_parameters: true };
 	}
 	if (![input, output].every(value => Number.isFinite(value) && value >= 0)) {
@@ -61,15 +65,19 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 	}
 	// One token per UTF-8 byte plus protocol overhead: deliberately conservative reservation.
 	const images = screenshotCount(body.messages);
-	if (images && (source !== 'bedrock' || !supportsScreenshots(model))) { throw new BudgetError('vision_unavailable', 'Выберите модель с поддержкой изображений, например Claude или Qwen3 VL.', 400); }
+	if (images) {
+		if (source === 'bedrock' && !supportsScreenshots(model)) { throw new BudgetError('vision_unavailable', 'Выберите модель с поддержкой изображений.', 400); }
+		if (source === 'openrouter') { await routerModel(model, true); }
+	}
 	const promptUpperBound = images && model.includes('anthropic.') ? await countBedrockInput(body, model)
 		: conservativeInputTokenBound(body.messages, body.tools);
 	if (promptUpperBound > Math.max(200_000, modelCapabilities(model).contextWindow * 4)) {
 		throw new BudgetError('context_too_large', 'Запрос превышает предел размера для выбранной модели. Сожмите историю.', 400);
 	}
-	const cache = source === 'bedrock' ? modelCapabilities(model).cache : undefined;
-	const cacheReadPerMillion = input * (cache?.readMultiplier ?? 1);
-	const cacheWritePerMillion = input * (cache?.writeMultiplier ?? 1);
+	const cache = source === 'bedrock' ? modelCapabilities(model).cache
+		: routerCacheMode(model) === 'explicit' ? { readMultiplier: 0.1, writeMultiplier: 1.25 } : undefined;
+	const cacheReadPerMillion = routerReadRate ?? input * (cache?.readMultiplier ?? 1);
+	const cacheWritePerMillion = Math.max(routerWriteRate, input * (cache?.writeMultiplier ?? 1));
 	return { input, output, cacheReadPerMillion, cacheWritePerMillion,
-		reservedMicros: costMicros(promptUpperBound, body.max_tokens || 4096, Math.max(input, cacheWritePerMillion), output) };
+		reservedMicros: costMicros(promptUpperBound, body.max_tokens || 4096, Math.max(input, cacheWritePerMillion, routerWriteRate), output) };
 }

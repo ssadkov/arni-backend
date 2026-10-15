@@ -242,11 +242,11 @@ export async function trafficByModel(models: readonly string[]): Promise<Map<str
  * order. Yellow stays. Unknown stays: a failed status check must not move everyone.
  * Paid models are never rewritten.
  */
-export function chooseRoutedModel(requested: string, lights: ReadonlyMap<string, TrafficLight>): { model: string; routedFrom: string | null } {
+export function chooseRoutedModel(requested: string, lights: ReadonlyMap<string, TrafficLight>, candidates: readonly string[] = WATCHED_FREE_MODELS): { model: string; routedFrom: string | null } {
 	if (!requested.endsWith(':free') || lights.get(requested) !== 'red') {
 		return { model: requested, routedFrom: null };
 	}
-	const healthy = WATCHED_FREE_MODELS.find(model => {
+	const healthy = candidates.find(model => {
 		const light = lights.get(model);
 		return model !== requested && (light === 'green' || light === 'yellow');
 	});
@@ -255,12 +255,12 @@ export function chooseRoutedModel(requested: string, lights: ReadonlyMap<string,
 		: { model: requested, routedFrom: null };
 }
 
-export async function routeFreeModel(requested: string): Promise<{ model: string; routedFrom: string | null }> {
+export async function routeFreeModel(requested: string, candidates: readonly string[] = WATCHED_FREE_MODELS): Promise<{ model: string; routedFrom: string | null }> {
 	if (!requested.endsWith(':free')) {
 		return { model: requested, routedFrom: null };
 	}
-	const lights = await trafficByModel([requested, ...WATCHED_FREE_MODELS]);
-	return chooseRoutedModel(requested, lights);
+	const lights = await trafficByModel([requested, ...candidates]);
+	return chooseRoutedModel(requested, lights, candidates);
 }
 
 /** A live completion burns the shared free-model budget, so the admin page only does this on demand. */
