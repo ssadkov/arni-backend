@@ -1,5 +1,7 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+Документация Arni backend: [Qwen3, кэш и журнал расходов](docs/qwen3-cache-and-usage.md), [скриншоты и генерация изображений](docs/bedrock-media-and-costs.md), [доступ и бюджет](docs/internal-access-and-billing.md).
+
 ## Getting Started
 
 First, run the development server:
