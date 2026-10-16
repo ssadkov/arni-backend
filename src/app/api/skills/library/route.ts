@@ -10,12 +10,13 @@ const headers = {
 
 /** Public, generic profession pack only. No account data, credentials or uploaded files. */
 export async function GET(request: Request) {
-	if (request.headers.get('if-none-match') === headers.ETag) {
+	const validators = request.headers.get('if-none-match')?.split(',').map(value => value.trim().replace(/^W\//, '')) ?? [];
+	if (validators.includes('*') || validators.includes(headers.ETag)) {
 		return new Response(null, { status: 304, headers });
 	}
 	return Response.json(catalog, { headers });
 }
 
 export async function OPTIONS() {
-	return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS' } });
+	return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'If-None-Match' } });
 }
