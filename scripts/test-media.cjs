@@ -9,6 +9,7 @@ global.fetch = async (url, options) => {
 	if (String(url).includes('/chat/completions')) {
 		routerCalls++; routerBody = JSON.parse(options.body);
 		if (routerMode === 'limited' && routerBody.model === 'test/vision:free') { return Response.json({ error: 'shared pool busy' }, { status: 429 }); }
+		if (routerMode === 'context') { return Response.json({ error: { code: 'context_length_exceeded' } }, { status: 400 }); }
 		return Response.json({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, cost: routerBody.model.endsWith(':free') ? 0 : 0.00005 } });
 	}
 	if (String(url).endsWith('/endpoints')) { return Response.json({ data: { endpoints: [{ provider_name: 'Test', status: 0, uptime_last_30m: 100 }] } }); }
@@ -86,6 +87,29 @@ async function main() {
 		assert.equal(captured.modelId, model.replace('us.', ''));
 		mode = 'count-failed'; await assert.rejects(budgetPrice(body, 'bedrock', model), error => error.code === 'vision_count_unavailable'); mode = 'success';
 	});
+	await check('paid rollout filters discovery and rejects direct IDs before reserving money or invoking a provider', async () => {
+		const saved = process.env.ARNI_PAID_MODEL_ALLOWLIST;
+		const { NextRequest } = require('next/server');
+		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
+		const headers = { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+		try {
+			process.env.ARNI_PAID_MODEL_ALLOWLIST = JSON.stringify([model]);
+			const result = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models', { headers }));
+			const models = (await result.json()).data;
+			assert.ok(models.some(row => row.id === model));
+			assert.ok(models.some(row => row.id === 'test/vision:free'));
+			assert.ok(!models.some(row => row.id === 'test/paid'));
+			const before = await prisma.budgetReservation.count({ where: { userId } });
+			const beforeCalls = routerCalls;
+			const denied = await require('../src/app/api/chat/completions/route.ts').POST(new NextRequest('http://localhost/api/chat/completions', {
+				method: 'POST', headers, body: JSON.stringify({ model: 'test/paid', messages: [{ role: 'user', content: 'hello' }] }),
+			}));
+			assert.equal(denied.status, 403);
+			assert.equal((await denied.json()).error.code, 'model_not_released');
+			assert.equal(routerCalls, beforeCalls);
+			assert.equal(await prisma.budgetReservation.count({ where: { userId } }), before);
+		} finally { if (saved === undefined) { delete process.env.ARNI_PAID_MODEL_ALLOWLIST; } else { process.env.ARNI_PAID_MODEL_ALLOWLIST = saved; } }
+	});
 	await check('one account selects free vision and paid models without provider changes; expired budget cannot block free', async () => {
 		const { NextRequest } = require('next/server');
 		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
@@ -132,6 +156,25 @@ async function main() {
 		assert.throws(() => managedBody({ messages: [{ role: 'user', content: [imagePart] }] }));
 		const large = Buffer.from(png, 'base64'); large.writeUInt32BE(9000, 16);
 		assert.throws(() => managedBody({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${large.toString('base64')}` } }] }] }, true));
+	});
+	await check('normalized context rejection restores the free step and never retries', async () => {
+		const { NextRequest } = require('next/server');
+		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
+		const before = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+		const callsBefore = routerCalls;
+		routerMode = 'context';
+		try {
+			const response = await require('../src/app/api/chat/completions/route.ts').POST(new NextRequest('http://localhost/api/chat/completions', {
+				method: 'POST', headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+				body: JSON.stringify({ model: 'test:free', messages: [{ role: 'user', content: 'hello' }] }),
+			}));
+			assert.equal(response.status, 400);
+			assert.equal((await response.json()).error.code, 'context_too_large');
+			assert.equal(routerCalls, callsBefore + 1);
+			const after = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+			assert.equal(after.freeStepsToday, before.freeStepsToday);
+			assert.equal(after.freeStepsTotal, before.freeStepsTotal);
+		} finally { routerMode = 'success'; }
 	});
 	await check('rate snapshot and requested/served model persist after catalog changes', async () => {
 		const id = crypto.randomUUID(); const reservation = await reserveBudget(userId, model, 'bedrock', 10000, 3, 15, { requestId: id, requestedModel: 'picker-label', imageCount: 1, region: 'us-east-1' });

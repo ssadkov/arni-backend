@@ -23,6 +23,8 @@ import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
 import { usageCostMicros } from '@/lib/budgetPolicy';
 import { modelCapabilities } from '@/lib/llm/modelCapabilities';
 import { routerCatalog, routerModel, zeroPrice } from '@/lib/llm/openRouterCatalog';
+import { CONTEXT_ERROR_MESSAGE, isContextError } from '@/lib/llm/contextError';
+import { requirePaidModelEnabled } from '@/lib/llm/paidModelRollout';
 
 export const maxDuration = 300;
 
@@ -170,6 +172,8 @@ export async function POST(req: NextRequest) {
       body.model = allowed;
     }
 
+    requirePaidModelEnabled(forcedBedrockModel || body.model, isFreeModel);
+
     let freeSteps: FreeStepSnapshot | null = null;
     if (isFreeModel) {
       freeSteps = await reserveFreeStep(user.id);
@@ -205,6 +209,8 @@ export async function POST(req: NextRequest) {
       const model = forcedBedrockModel || body.model;
       if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
       const price = await budgetPrice(body, provider, model);
+      // Numeric diagnostics only: never log prompts, file contents, tool arguments or credentials.
+      console.info('llm_preflight', JSON.stringify({ requestId, source: provider, model, ...price.preflight, reservedMicros: price.reservedMicros }));
       const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output,
         { requestId, requestedModel, chatId, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined });
       budgetReservationId = reservation.id;
@@ -248,11 +254,17 @@ export async function POST(req: NextRequest) {
     if (!response.ok) {
       if (budgetReservationId) { await settleBudget(budgetReservationId, null, response.status >= 400 && response.status < 500 && response.status !== 408, servedModel); }
       const errorText = await response.text();
-      await track(response.status, errorText, servedModel);
       if (reservedUserId) {
         freeSteps = await releaseFreeStep(reservedUserId);
         reservedUserId = null;
       }
+      if (isContextError(response.status, errorText)) {
+        await track(400, 'context_too_large', servedModel);
+        return NextResponse.json({ error: { code: 'context_too_large', message: CONTEXT_ERROR_MESSAGE }, requestId }, {
+          status: 400, headers: { 'X-Arni-Request-Id': requestId, 'X-Llm-Provider': provider, 'X-Llm-Model': servedModel },
+        });
+      }
+      await track(response.status, errorText, servedModel);
       return new NextResponse(errorText, {
         status: response.status,
         headers: freeSteps ? freeStepHeaders(freeSteps) : undefined,
