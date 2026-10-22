@@ -14,6 +14,8 @@ $taskSavedEnvironment = @{}
 foreach ($taskName in $taskEnvironmentNames) { $taskSavedEnvironment[$taskName] = [Environment]::GetEnvironmentVariable($taskName, 'Process') }
 Push-Location $taskRepo
 try {
+	node scripts/test-request-limits.cjs
+	if ($LASTEXITCODE -ne 0) { throw 'Request limit and model rollout checks failed' }
 	node scripts/test-bedrock-converse.cjs
 	if ($LASTEXITCODE -ne 0) { throw 'Bedrock conversion checks failed' }
 	node scripts/test-router-cache.cjs

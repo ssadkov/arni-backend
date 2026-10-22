@@ -181,6 +181,7 @@ async function main() {
 				const complete = async () => {
 					calls++;
 					if (mode === 'error') { return new Response('Upstream refused', { status: 400 }); }
+					if (mode === 'context') { return Response.json({ error: { code: 'context_length_exceeded', message: 'maximum context exceeded' } }, { status: 400 }); }
 					if (mode === 'uncertain') { return new Response('Upstream timeout', { status: 503 }); }
 					if (mode === 'stream') {
 						const bytes = new TextEncoder().encode('data: {"usage":{"prompt_tokens":100,"completion_tokens":10}}\n\ndata: [DONE]\n\n');
@@ -209,6 +210,14 @@ async function main() {
 		mode = 'error';
 		assert.equal((await chat(request(false))).status, 400);
 		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, after.balanceMicros);
+		mode = 'context';
+		const beforeContextCalls = calls;
+		const contextFailure = await chat(request(false));
+		assert.equal(contextFailure.status, 400);
+		assert.equal((await contextFailure.json()).error.code, 'context_too_large');
+		assert.ok(contextFailure.headers.get('X-Arni-Request-Id'));
+		assert.equal(calls, beforeContextCalls + 1, 'A paid context failure is not retried or routed to another model');
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, after.balanceMicros, 'Confirmed context rejection refunds the reserve');
 		mode = 'uncertain';
 		assert.equal((await chat(request(false))).status, 503);
 		const uncertain = await prisma.budgetReservation.findFirstOrThrow({ where: { userId, status: 'estimated', model: 'test-bedrock' } });

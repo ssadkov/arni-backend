@@ -5,6 +5,7 @@ import prisma from '@/lib/prisma';
 import { modelIdForUser, modelsAllowedForUser } from '@/lib/llm/bedrockAccess';
 import { managedModelMetadata } from '@/lib/llm/modelCapabilities';
 import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/lib/llm/openRouterCatalog';
+import { paidModelEnabled } from '@/lib/llm/paidModelRollout';
 
 export async function GET(req: NextRequest) {
 	try {
@@ -19,9 +20,10 @@ export async function GET(req: NextRequest) {
 			if (!user || user.isBanned) { return NextResponse.json({ error: 'Account is blocked' }, { status: 403 }); }
 			managed = Boolean(user.budget);
 			if (managed) {
-				const allowed = await modelsAllowedForUser(userId);
-				const selected = await modelIdForUser(userId, user.bedrockModelId);
-				bedrock = allowed.filter(model => model.inputPerMillion != null && model.outputPerMillion != null).map(model => ({
+				const allowed = (await modelsAllowedForUser(userId)).filter(model => paidModelEnabled(model.id) && model.inputPerMillion != null && model.outputPerMillion != null);
+				const preferred = await modelIdForUser(userId, user.bedrockModelId);
+				const selected = allowed.some(model => model.id === preferred) ? preferred : allowed[0]?.id;
+				bedrock = allowed.map(model => ({
 					id: model.id, name: model.name, arni_default: user.llmProvider === 'BEDROCK' && model.id === selected,
 					arni_provider: 'bedrock', supported_parameters: ['tools'], ...managedModelMetadata(model.id),
 					pricing: { prompt: String(model.inputPerMillion! / 1_000_000), completion: String(model.outputPerMillion! / 1_000_000) },
@@ -33,7 +35,7 @@ export async function GET(req: NextRequest) {
 		try { router = await routerCatalog(); }
 		catch (error) { if (!bedrock.length) { throw error; } router = []; }
 		const lights = await trafficByModel(WATCHED_FREE_MODELS);
-		const models = router.filter(model => managed ? model.architecture?.input_modalities?.includes('text') : zeroPrice(model)).map(model => ({
+		const models = router.filter(model => (managed ? model.architecture?.input_modalities?.includes('text') : zeroPrice(model)) && paidModelEnabled(model.id, zeroPrice(model))).map(model => ({
 			...model, arni_provider: 'openrouter', arni_free: zeroPrice(model), arni_cache: routerCacheMode(model.id),
 			top_provider: { ...model.top_provider, max_completion_tokens: Math.min(model.top_provider?.max_completion_tokens || 4096, 4096) },
 			arni_traffic: lights.get(model.id),
