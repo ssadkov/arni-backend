@@ -11,6 +11,10 @@ const models = [
 	['qwen.qwen3-coder-30b-a3b-v1:0', 'Qwen3 Coder 30B A3B', 'us-east-1'],
 	['qwen.qwen3-coder-480b-a35b-v1:0', 'Qwen3 Coder 480B A35B', 'us-west-2'],
 	['qwen.qwen3-235b-a22b-2507-v1:0', 'Qwen3 235B A22B 2507', 'us-west-2'],
+	// Names must match the `model` attribute of the AWS Pricing API.
+	['deepseek.v3.2', 'DeepSeek v3.2', 'us-east-1'],
+	['minimax.minimax-m2.5', 'MiniMax M2.5', 'us-east-1'],
+	['moonshotai.kimi-k2.5', 'Kimi K2.5', 'us-east-1'],
 ];
 
 function aws(region, ...args) {
@@ -33,7 +37,7 @@ const rows = models.map(([id, name, region]) => {
 	const availability = aws(region, 'bedrock', 'get-foundation-model-availability', '--model-id', id);
 	if (availability.authorizationStatus !== 'AUTHORIZED' || availability.regionAvailability !== 'AVAILABLE'
 		|| availability.agreementAvailability?.status !== 'AVAILABLE' || availability.entitlementAvailability !== 'AVAILABLE') {
-		throw new Error(`Qwen model is not available: ${id}`);
+		throw new Error(`Bedrock model is not available: ${id}`);
 	}
 	const response = aws('us-east-1', 'pricing', 'get-products', '--service-code', 'AmazonBedrock', '--filters',
 		`Type=TERM_MATCH,Field=model,Value=${name}`, `Type=TERM_MATCH,Field=regionCode,Value=${region}`, '--max-results', '100');

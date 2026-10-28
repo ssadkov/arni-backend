@@ -14,7 +14,7 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
 
 const runtime = require('@aws-sdk/client-bedrock-runtime');
 const { toConverse, completeWithBedrock, cacheConversePrefix, bedrockUsage } = require('../src/lib/llm/bedrock.ts');
-const { modelCapabilities, managedModelMetadata, QWEN3_MODEL_IDS } = require('../src/lib/llm/modelCapabilities.ts');
+const { modelCapabilities, managedModelMetadata, QWEN3_MODEL_IDS, OPEN_WEIGHT_MODEL_IDS } = require('../src/lib/llm/modelCapabilities.ts');
 const { supportsScreenshots, conservativeInputTokenBound } = require('../src/lib/llm/vision.ts');
 const model = 'us.anthropic.claude-sonnet-4-6';
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNGkAAAAASUVORK5CYII=';
@@ -86,9 +86,11 @@ async function main() {
 		assert.equal(modelCapabilities('us.anthropic.claude-haiku-4-5-20251001-v1:0').contextWindow, 200000);
 		assert.equal(modelCapabilities('qwen.qwen3-32b-v1:0').contextWindow, 32768);
 		assert.equal(modelCapabilities('qwen.qwen3-coder-480b-a35b-v1:0').region, 'us-west-2');
-		for (const id of QWEN3_MODEL_IDS) {
+		const longHistory = [{ role: 'user', content: [{ text: 'Reference '.repeat(5000) }] }, { role: 'assistant', content: [{ text: 'ok' }] }];
+		for (const id of [...QWEN3_MODEL_IDS, ...OPEN_WEIGHT_MODEL_IDS]) {
 			assert.equal(supportsScreenshots(id), id === 'qwen.qwen3-vl-235b-a22b');
 			assert.ok(managedModelMetadata(id).top_provider.max_completion_tokens < modelCapabilities(id).contextWindow);
+			assert.equal(cacheConversePrefix(id, longHistory), longHistory, 'AWS lists no cache tariff for open-weight models');
 		}
 	});
 	await check('Qwen screenshot reservation counts image dimensions without charging base64 as text', () => {
