@@ -17,11 +17,23 @@ const qwen: Record<string, ModelCapabilities> = {
 	'qwen.qwen3-235b-a22b-2507-v1:0': { contextWindow: 262144, maxOutputTokens: 8192, vision: false, region: 'us-west-2' },
 };
 
+/**
+ * Added 2026-10-29 after a live Converse tool-call and exact-copy check. Context is a conservative
+ * lower bound, not the vendor maximum; AWS lists no cache tariff for these models.
+ */
+const openWeight: Record<string, ModelCapabilities> = {
+	'deepseek.v3.2': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
+	'minimax.minimax-m2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
+	'moonshotai.kimi-k2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
+};
+
 export const QWEN3_MODEL_IDS = Object.keys(qwen);
+export const OPEN_WEIGHT_MODEL_IDS = Object.keys(openWeight);
 export const MANAGED_MAX_OUTPUT_TOKENS = 4096;
 
 export function modelCapabilities(model: string): ModelCapabilities {
 	if (qwen[model]) { return qwen[model]; }
+	if (openWeight[model]) { return openWeight[model]; }
 	if (/anthropic\.claude-sonnet-4-6/.test(model)) {
 		return { contextWindow: 1_000_000, maxOutputTokens: 64000, vision: true,
 			cache: { minimumTokens: 2048, readMultiplier: 0.1, writeMultiplier: 1.25 } };
