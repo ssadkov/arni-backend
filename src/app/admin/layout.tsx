@@ -1,5 +1,8 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { ReactNode } from 'react';
+
+export const metadata: Metadata = { title: 'Админка' };
 
 export default function AdminLayout({ children }: { children: ReactNode }) {
   return (
