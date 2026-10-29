@@ -1,5 +1,18 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import prisma from '@/lib/prisma';
+import type { CatalogRow } from '@/lib/llm/bedrockAccess';
 import { ImportCatalog, ModelToggle } from './ModelControls';
+
+/** Models shipped in data/bedrock-models.json that the database has not imported yet. */
+async function catalogMissingFromDatabase(known: Set<string>): Promise<CatalogRow[]> {
+	try {
+		const rows = JSON.parse(await readFile(path.join(process.cwd(), 'data', 'bedrock-models.json'), 'utf8')) as CatalogRow[];
+		return rows.filter(row => !known.has(row.id));
+	} catch {
+		return [];
+	}
+}
 
 export const dynamic = 'force-dynamic';
 
@@ -34,6 +47,7 @@ export default async function ModelsPage() {
 	} catch {
 		dbError = true;
 	}
+	const missing = dbError ? [] : await catalogMissingFromDatabase(new Set(models.map(model => model.id)));
 
 	return (
 		<div className="space-y-6">
@@ -50,6 +64,13 @@ export default async function ModelsPage() {
 			{dbError && (
 				<div className="bg-red-50 border-l-4 border-red-500 p-4 text-red-700">
 					База данных не подключена.
+				</div>
+			)}
+
+			{missing.length > 0 && (
+				<div className="bg-amber-50 border-l-4 border-amber-500 p-4 text-amber-800">
+					В каталоге выпуска есть модели, которых нет в базе ({missing.length}): {missing.map(row => row.name).join(', ')}.
+					Нажмите «Загрузить каталог», чтобы их можно было выдать пользователям.
 				</div>
 			)}
 

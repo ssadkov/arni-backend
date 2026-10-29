@@ -14,27 +14,32 @@ export default async function AdminDashboard() {
   let unpricedRequests = 0;
 
   try {
-    userCount = await prisma.user.count();
-    waitlistCount = await prisma.user.count({ where: { proWaitlistAt: { not: null } } })
-      + await prisma.waitlistEntry.count();
-    const logs = await prisma.usageLog.aggregate({
-      _sum: {
-        promptTokens: true,
-        completionTokens: true,
-        costMicros: true,
-      },
-      _count: { id: true, costMicros: true },
-    });
+    // Independent queries: run them together instead of paying six database round trips in a row.
+    const [users, waitlistUsers, waitlistEntries, logs, today, lifetime] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { proWaitlistAt: { not: null } } }),
+      prisma.waitlistEntry.count(),
+      prisma.usageLog.aggregate({
+        _sum: {
+          promptTokens: true,
+          completionTokens: true,
+          costMicros: true,
+        },
+        _count: { id: true, costMicros: true },
+      }),
+      prisma.user.aggregate({
+        where: { freeStepsDay: utcDayKey() },
+        _sum: { freeStepsToday: true },
+      }),
+      prisma.user.aggregate({
+        _sum: { freeStepsTotal: true },
+      }),
+    ]);
+    userCount = users;
+    waitlistCount = waitlistUsers + waitlistEntries;
     totalTokens = (logs._sum.promptTokens || 0) + (logs._sum.completionTokens || 0);
     recordedCostMicros = logs._sum.costMicros || 0;
     unpricedRequests = logs._count.id - logs._count.costMicros;
-    const today = await prisma.user.aggregate({
-      where: { freeStepsDay: utcDayKey() },
-      _sum: { freeStepsToday: true },
-    });
-    const lifetime = await prisma.user.aggregate({
-      _sum: { freeStepsTotal: true },
-    });
     freeStepsToday = today._sum.freeStepsToday || 0;
     freeStepsTotal = lifetime._sum.freeStepsTotal || 0;
   } catch (error) {
