@@ -88,10 +88,25 @@ async function main() {
 		assert.equal(modelCapabilities('qwen.qwen3-coder-480b-a35b-v1:0').region, 'us-west-2');
 		const longHistory = [{ role: 'user', content: [{ text: 'Reference '.repeat(5000) }] }, { role: 'assistant', content: [{ text: 'ok' }] }];
 		for (const id of [...QWEN3_MODEL_IDS, ...OPEN_WEIGHT_MODEL_IDS]) {
-			assert.equal(supportsScreenshots(id), id === 'qwen.qwen3-vl-235b-a22b');
+			assert.equal(supportsScreenshots(id), ['qwen.qwen3-vl-235b-a22b', 'moonshotai.kimi-k2.5'].includes(id));
 			assert.ok(managedModelMetadata(id).top_provider.max_completion_tokens < modelCapabilities(id).contextWindow);
 			assert.equal(cacheConversePrefix(id, longHistory), longHistory, 'AWS lists no cache tariff for open-weight models');
 		}
+	});
+	await check('Qwen VL and Kimi receive tool screenshots beside toolResult; Claude keeps them inside', () => {
+		const shot = { id: 'shot', function: { name: 'screenshot', arguments: '{}' } };
+		const body = { messages: [{ role: 'user', content: 'Check the page.' }, { role: 'assistant', tool_calls: [call, shot] },
+			{ role: 'tool', tool_call_id: call.id, content: 'saved' }, { role: 'tool', tool_call_id: shot.id, content: [{ type: 'text', text: 'Page' }, image] }] };
+		for (const id of ['qwen.qwen3-vl-235b-a22b', 'moonshotai.kimi-k2.5']) {
+			const last = toConverse(body, id).messages.at(-1);
+			assert.deepEqual(last.content.map(block => Object.keys(block)[0]), ['toolResult', 'toolResult', 'image']);
+			assert.ok(last.content.every(block => !block.toolResult?.content.some(output => output.image)));
+			assert.match(last.content[1].toolResult.content.at(-1).text, /attached after the tool results/);
+			assertValidText({ messages: toConverse(body, id).messages });
+		}
+		const claude = toConverse(body, model).messages.at(-1);
+		assert.deepEqual(claude.content.map(block => Object.keys(block)[0]), ['toolResult', 'toolResult']);
+		assert.ok(claude.content[1].toolResult.content.some(output => output.image));
 	});
 	await check('Qwen screenshot reservation counts image dimensions without charging base64 as text', () => {
 		const body = [{ role: 'user', content: [image] }];

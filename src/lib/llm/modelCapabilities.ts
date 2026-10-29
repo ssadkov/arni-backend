@@ -5,13 +5,18 @@ export type ModelCapabilities = {
 	vision: boolean;
 	region?: string;
 	cache?: { minimumTokens: number; readMultiplier: number; writeMultiplier: number };
+	/**
+	 * False when Bedrock rejects image blocks inside a toolResult ("doesn't support the image field
+	 * for user messages") but accepts the same image as a sibling block of that user message.
+	 */
+	toolResultImages?: false;
 };
 
 const qwen: Record<string, ModelCapabilities> = {
 	'qwen.qwen3-coder-next': { contextWindow: 262144, maxOutputTokens: 16384, vision: false, region: 'us-east-1' },
 	'qwen.qwen3-next-80b-a3b': { contextWindow: 262144, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
 	'qwen.qwen3-32b-v1:0': { contextWindow: 32768, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
-	'qwen.qwen3-vl-235b-a22b': { contextWindow: 262144, maxOutputTokens: 8192, vision: true, region: 'us-east-1' },
+	'qwen.qwen3-vl-235b-a22b': { contextWindow: 262144, maxOutputTokens: 8192, vision: true, region: 'us-east-1', toolResultImages: false },
 	'qwen.qwen3-coder-30b-a3b-v1:0': { contextWindow: 262144, maxOutputTokens: 16384, vision: false, region: 'us-east-1' },
 	'qwen.qwen3-coder-480b-a35b-v1:0': { contextWindow: 131072, maxOutputTokens: 16384, vision: false, region: 'us-west-2' },
 	'qwen.qwen3-235b-a22b-2507-v1:0': { contextWindow: 262144, maxOutputTokens: 8192, vision: false, region: 'us-west-2' },
@@ -24,7 +29,8 @@ const qwen: Record<string, ModelCapabilities> = {
 const openWeight: Record<string, ModelCapabilities> = {
 	'deepseek.v3.2': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
 	'minimax.minimax-m2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
-	'moonshotai.kimi-k2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
+	// Reads a contract page exactly from a screenshot (verified 2026-10-30), but only outside toolResult.
+	'moonshotai.kimi-k2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: true, region: 'us-east-1', toolResultImages: false },
 };
 
 export const QWEN3_MODEL_IDS = Object.keys(qwen);

@@ -144,7 +144,27 @@ function normalizeToolHistory(messages: Message[]): Message[] {
 	return normalized;
 }
 
-export function toConverse(body: ChatBody): { system: { text: string }[]; messages: Message[]; toolConfig?: ToolConfiguration } {
+/** Move tool-result images next to their toolResult blocks, keeping every toolResult first in the message. */
+function liftToolResultImages(messages: Message[]): Message[] {
+	return messages.map(message => {
+		if (message.role !== 'user' || !message.content?.some(block => block.toolResult?.content?.some(output => output.image))) {
+			return message;
+		}
+		const results: ContentBlock[] = [];
+		const rest: ContentBlock[] = [];
+		for (const block of message.content) {
+			if (!block.toolResult) { rest.push(block); continue; }
+			const images = (block.toolResult.content ?? []).filter(output => output.image);
+			const texts = (block.toolResult.content ?? []).filter(output => !output.image);
+			const note = images.length ? [{ text: `Image output (${images.length}) is attached after the tool results.` }] : [];
+			results.push({ toolResult: { ...block.toolResult, content: [...texts, ...note] as never } });
+			rest.push(...images.map(output => ({ image: output.image! })));
+		}
+		return { ...message, content: [...results, ...rest] };
+	});
+}
+
+export function toConverse(body: ChatBody, modelId?: string): { system: { text: string }[]; messages: Message[]; toolConfig?: ToolConfiguration } {
 	screenshotCount((body.messages || []) as Array<Record<string, unknown>>);
 	const system: { text: string }[] = [];
 	const messages: Message[] = [];
@@ -221,9 +241,10 @@ export function toConverse(body: ChatBody): { system: { text: string }[]; messag
 			},
 		}));
 
+	const normalized = normalizeToolHistory(messages);
 	return {
 		system,
-		messages: normalizeToolHistory(messages),
+		messages: modelId && modelCapabilities(modelId).toolResultImages === false ? liftToolResultImages(normalized) : normalized,
 		toolConfig: tools.length > 0 ? { tools } : undefined,
 	};
 }
@@ -390,9 +411,9 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 	try {
 		const modelId = forcedModelId || await resolveModelId(body.model);
 		if (screenshotCount((body.messages || []) as Array<Record<string, unknown>>) && !supportsScreenshots(modelId)) {
-			throw new BudgetError('vision_unavailable', 'Выберите модель с поддержкой изображений, например Claude или Qwen3 VL.', 400);
+			throw new BudgetError('vision_unavailable', 'Выберите модель с поддержкой изображений, например Claude, Kimi K2.5 или Qwen3 VL.', 400);
 		}
-		const { system, messages, toolConfig } = toConverse(body);
+		const { system, messages, toolConfig } = toConverse(body, modelId);
 		const inferenceConfig = {
 			maxTokens: maxTokens(body),
 			...(typeof body.temperature === 'number' ? { temperature: body.temperature } : {}),
@@ -458,7 +479,7 @@ export async function countBedrockInput(body: ChatBody, modelId: string) {
 		// CountTokens targets the foundation model, not its cross-region inference profile.
 		const countingModelId = modelId.replace(/^(?:us|eu|apac|global)\.(?=anthropic\.)/, '');
 		const runtime = client();
-		const response = await runtime.send(new CountTokensCommand({ modelId: countingModelId, input: { converse: toConverse(body) } }),
+		const response = await runtime.send(new CountTokensCommand({ modelId: countingModelId, input: { converse: toConverse(body, modelId) } }),
 			{ abortSignal: AbortSignal.timeout(30_000) }).finally(() => runtime.destroy());
 		if (!Number.isSafeInteger(response.inputTokens) || response.inputTokens! < 0) { throw new Error('Invalid token count'); }
 		return response.inputTokens!;
