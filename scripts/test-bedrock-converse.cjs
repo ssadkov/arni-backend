@@ -13,7 +13,7 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
 }).outputText, filename);
 
 const runtime = require('@aws-sdk/client-bedrock-runtime');
-const { toConverse, completeWithBedrock, cacheConversePrefix, bedrockUsage } = require('../src/lib/llm/bedrock.ts');
+const { toConverse, completeWithBedrock, cacheConversePrefix, cacheConverseSystem, bedrockUsage } = require('../src/lib/llm/bedrock.ts');
 const { modelCapabilities, managedModelMetadata, QWEN3_MODEL_IDS, OPEN_WEIGHT_MODEL_IDS } = require('../src/lib/llm/modelCapabilities.ts');
 const { supportsScreenshots, conservativeInputTokenBound } = require('../src/lib/llm/vision.ts');
 const model = 'us.anthropic.claude-sonnet-4-6';
@@ -92,6 +92,17 @@ async function main() {
 			assert.ok(managedModelMetadata(id).top_provider.max_completion_tokens < modelCapabilities(id).contextWindow);
 			assert.equal(cacheConversePrefix(id, longHistory), longHistory, 'AWS lists no cache tariff for open-weight models');
 		}
+		for (const id of ['us.amazon.nova-micro-v1:0', 'us.amazon.nova-lite-v1:0', 'us.amazon.nova-pro-v1:0', 'global.amazon.nova-2-lite-v1:0', 'us.amazon.nova-2-lite-v1:0']) {
+			assert.equal(cacheConversePrefix(id, longHistory)[0].content.at(-1).cachePoint.type, 'default');
+			const toolTurn = toConverse({ messages: [{ role: 'user', content: 'Reference '.repeat(5000) }, { role: 'assistant', tool_calls: [call] }, { role: 'tool', tool_call_id: call.id, content: 'saved' }, { role: 'assistant', tool_calls: [{ ...call, id: 'next' }] }, { role: 'tool', tool_call_id: 'next', content: 'saved' }] }, id).messages;
+			assert.deepEqual(cacheConversePrefix(id, toolTurn).map(message => message.content.some(block => block.cachePoint)), [true, false, false, false, false], 'Nova rejects a cachePoint beside tool blocks');
+			assert.equal(cacheConverseSystem(id, [{ text: 'System '.repeat(1000) }]).at(-1).cachePoint.type, 'default');
+			assert.equal(supportsScreenshots(id), !id.includes('micro'));
+		}
+		assert.equal(modelCapabilities('us.amazon.nova-premier-v1:0').cache, undefined, 'Premier is end of life');
+		const usage = bedrockUsage('us.amazon.nova-pro-v1:0', { inputTokens: 100, cacheReadInputTokens: 1000, cacheWriteInputTokens: 500, outputTokens: 10 }, { inputPerMillion: 0.8, outputPerMillion: 3.2 });
+		assert.equal(usage.prompt_tokens, 1600);
+		assert.ok(Math.abs(usage.cost - (100 * 0.8 + 1000 * 0.2 + 10 * 3.2) / 1_000_000) < 1e-9, 'Nova reads cost 25%, writes are free');
 	});
 	await check('Qwen VL and Kimi receive tool screenshots beside toolResult; Claude keeps them inside', () => {
 		const shot = { id: 'shot', function: { name: 'screenshot', arguments: '{}' } };
