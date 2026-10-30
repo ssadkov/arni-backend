@@ -3,8 +3,13 @@ import { trafficByModel, WATCHED_FREE_MODELS } from '@/lib/openRouterStatus';
 import { decryptJWT } from '@/lib/jwt';
 import prisma from '@/lib/prisma';
 import { modelIdForUser, modelsAllowedForUser } from '@/lib/llm/bedrockAccess';
-import { managedModelMetadata } from '@/lib/llm/modelCapabilities';
+import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, managedModelMetadata } from '@/lib/llm/modelCapabilities';
 import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/lib/llm/openRouterCatalog';
+
+function outputLimit(model: RouterModel): number {
+	const limit = zeroPrice(model) ? FREE_MAX_OUTPUT_TOKENS : MANAGED_MAX_OUTPUT_TOKENS;
+	return Math.min(model.top_provider?.max_completion_tokens || limit, limit);
+}
 
 export async function GET(req: NextRequest) {
 	try {
@@ -35,7 +40,7 @@ export async function GET(req: NextRequest) {
 		const lights = await trafficByModel(WATCHED_FREE_MODELS);
 		const models = router.filter(model => managed ? model.architecture?.input_modalities?.includes('text') : zeroPrice(model)).map(model => ({
 			...model, arni_provider: 'openrouter', arni_free: zeroPrice(model), arni_cache: routerCacheMode(model.id),
-			top_provider: { ...model.top_provider, max_completion_tokens: Math.min(model.top_provider?.max_completion_tokens || 4096, 4096) },
+			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
 			arni_traffic: lights.get(model.id),
 		}));
 		return NextResponse.json({ arni_managed: managed, data: [...bedrock, ...models] }, {

@@ -12,13 +12,16 @@ export type RouterModel = {
 let cached: { until: number; models: RouterModel[] } | undefined;
 
 /** Public metadata only; credentials and user grants are never cached here. */
+/** Listed by OpenRouter, but refused for this app: 502 "only available on agentic harnesses" (2026-10-30). */
+const UNUSABLE_MODELS = new Set(['thinkingmachines/inkling:free']);
+
 export async function routerCatalog(): Promise<RouterModel[]> {
 	if (cached && cached.until > Date.now()) { return cached.models; }
 	const response = await fetch('https://openrouter.ai/api/v1/models?supported_parameters=tools', { cache: 'no-store', signal: AbortSignal.timeout(12_000) });
 	if (!response.ok) { throw new BudgetError('catalog_unavailable', 'Каталог моделей временно недоступен. Повторите запрос.', 503); }
 	const data = await response.json();
 	if (!Array.isArray(data.data)) { throw new BudgetError('catalog_unavailable', 'Некорректный каталог моделей.', 503); }
-	const models: RouterModel[] = data.data.filter((row: RouterModel) => typeof row.id === 'string' && row.supported_parameters?.includes('tools'));
+	const models: RouterModel[] = data.data.filter((row: RouterModel) => typeof row.id === 'string' && row.supported_parameters?.includes('tools') && !UNUSABLE_MODELS.has(row.id));
 	cached = { until: Date.now() + 60_000, models };
 	return models;
 }

@@ -40,6 +40,7 @@ const openWeight: Record<string, ModelCapabilities> = {
 export const QWEN3_MODEL_IDS = Object.keys(qwen);
 export const OPEN_WEIGHT_MODEL_IDS = Object.keys(openWeight);
 export const MANAGED_MAX_OUTPUT_TOKENS = 4096;
+export const FREE_MAX_OUTPUT_TOKENS = 16000;
 
 export function modelCapabilities(model: string): ModelCapabilities {
 	if (qwen[model]) { return qwen[model]; }

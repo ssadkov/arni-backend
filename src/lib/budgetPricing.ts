@@ -2,7 +2,7 @@ import prisma from '@/lib/prisma';
 import { BudgetError } from './budget';
 import { costMicros } from './budgetPolicy';
 import { screenshotCount, supportsScreenshots, conservativeInputTokenBound } from './llm/vision';
-import { modelCapabilities } from './llm/modelCapabilities';
+import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, modelCapabilities } from './llm/modelCapabilities';
 import { countBedrockInput } from './llm/bedrock';
 import { routerModel, routerCacheMode } from './llm/openRouterCatalog';
 
@@ -24,14 +24,16 @@ export function managedBody(body: BudgetBody, allowImages = false): BudgetBody {
 			? 'Поддерживаются текст, PNG/JPEG и инструменты агента. Другие форматы и платные серверные инструменты недоступны.'
 			: 'Для этого провайдера поддерживаются текст и инструменты агента. Для скриншотов выберите Claude через Bedrock.', 400);
 	}
-	const requested = body.max_completion_tokens ?? body.max_tokens ?? 4096;
+	// Free models cost nothing per token, and long reasoning must not end before the tool call.
+	const outputLimit = typeof body.model === 'string' && body.model.endsWith(':free') ? FREE_MAX_OUTPUT_TOKENS : MANAGED_MAX_OUTPUT_TOKENS;
+	const requested = body.max_completion_tokens ?? body.max_tokens ?? outputLimit;
 	if (allowImages) { screenshotCount(body.messages); }
 	if (!Number.isFinite(requested) || requested < 1) { throw new BudgetError('invalid_output_limit', 'Некорректный лимит ответа.', 400); }
 	const messages = body.messages.map(message => ({ role: message.role, content: Array.isArray(message.content) ? message.content.map(part => part.type === 'image_url' ? { type: 'image_url', image_url: { url: part.image_url.url } } : { type: 'text', text: part.text }) : message.content,
 		tool_call_id: message.tool_call_id, tool_calls: message.tool_calls }));
 	const tools = body.tools?.map(tool => ({ type: 'function', function: tool.function }));
 	return { model: body.model, messages, tools, stream: body.stream === true,
-		max_tokens: Math.min(Math.floor(requested), 4096), temperature: body.temperature,
+		max_tokens: Math.min(Math.floor(requested), outputLimit), temperature: body.temperature,
 		tool_choice: body.tool_choice, stream_options: { include_usage: true } };
 }
 
