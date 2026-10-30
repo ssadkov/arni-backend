@@ -5,6 +5,7 @@ import {
 	CountTokensCommand,
 	type ContentBlock,
 	type Message,
+	type SystemContentBlock,
 	type Tool,
 	type ToolConfiguration,
 	type TokenUsage,
@@ -371,10 +372,22 @@ export function bedrockUsage(model: string, usage: Partial<TokenUsage>, price?: 
 /** Rolling prefix checkpoints let subsequent tool steps reuse history without caching Qwen requests. */
 export function cacheConversePrefix(model: string, messages: Message[]): Message[] {
 	const cache = modelCapabilities(model).cache;
+	if (cache?.textOnly) {
+		const textIndex = messages.findLastIndex(message => message.role === 'user' && message.content?.every(block => 'text' in block));
+		if (textIndex < 0 || Buffer.byteLength(JSON.stringify(messages.slice(0, textIndex + 1))) < cache.minimumTokens * 4) { return messages; }
+		return messages.map((message, index) => index === textIndex
+			? { ...message, content: [...(message.content || []), { cachePoint: { type: 'default' } }] } : message);
+	}
 	if (!cache || messages.length < 2 || Buffer.byteLength(JSON.stringify(messages)) < cache.minimumTokens * 4) { return messages; }
 	const prefixIndex = messages.length - 2;
 	return messages.map((message, index) => index === prefixIndex
 		? { ...message, content: [...(message.content || []), { cachePoint: { type: 'default' } }] } : message);
+}
+
+/** Models that cannot checkpoint tool history still reuse the system prompt, which is most of an agent's fixed prefix. */
+export function cacheConverseSystem(model: string, system: { text: string }[]): SystemContentBlock[] {
+	const cache = modelCapabilities(model).cache;
+	return cache?.textOnly && Buffer.byteLength(JSON.stringify(system)) >= cache.minimumTokens * 4 ? [...system, { cachePoint: { type: 'default' } }] : system;
 }
 
 function usagePayload(model: string, usage: Partial<TokenUsage>, price?: CatalogPrice | null): unknown {
@@ -421,7 +434,7 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 		const input = {
 			modelId,
 			messages: price ? cacheConversePrefix(modelId, messages) : messages,
-			...(system.length > 0 ? { system } : {}),
+			...(system.length > 0 ? { system: price ? cacheConverseSystem(modelId, system) : system } : {}),
 			...(toolConfig ? { toolConfig } : {}),
 			inferenceConfig,
 		};

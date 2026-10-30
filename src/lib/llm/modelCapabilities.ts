@@ -4,7 +4,11 @@ export type ModelCapabilities = {
 	maxOutputTokens: number;
 	vision: boolean;
 	region?: string;
-	cache?: { minimumTokens: number; readMultiplier: number; writeMultiplier: number };
+	/**
+	 * `textOnly`: Bedrock rejects a cachePoint in a message with toolUse or toolResult, so only the
+	 * system prompt and text-only user messages can be checkpointed, not the rolling tool history.
+	 */
+	cache?: { minimumTokens: number; readMultiplier: number; writeMultiplier: number; textOnly?: true };
 	/**
 	 * False when Bedrock rejects image blocks inside a toolResult ("doesn't support the image field
 	 * for user messages") but accepts the same image as a sibling block of that user message.
@@ -40,6 +44,12 @@ export const MANAGED_MAX_OUTPUT_TOKENS = 4096;
 export function modelCapabilities(model: string): ModelCapabilities {
 	if (qwen[model]) { return qwen[model]; }
 	if (openWeight[model]) { return openWeight[model]; }
+	// AWS tariff: cache read is 25% of input, cache write is free. Premier is end of life and stays out.
+	const nova = /amazon\.nova-(micro|lite|pro|2-lite)-/.exec(model)?.[1];
+	if (nova) {
+		return { contextWindow: nova === 'micro' ? 128000 : 300000, maxOutputTokens: MANAGED_MAX_OUTPUT_TOKENS, vision: nova !== 'micro',
+			cache: { minimumTokens: 1000, readMultiplier: 0.25, writeMultiplier: 0, textOnly: true } };
+	}
 	if (/anthropic\.claude-sonnet-4-6/.test(model)) {
 		return { contextWindow: 1_000_000, maxOutputTokens: 64000, vision: true,
 			cache: { minimumTokens: 2048, readMultiplier: 0.1, writeMultiplier: 1.25 } };
