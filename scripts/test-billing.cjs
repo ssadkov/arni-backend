@@ -161,6 +161,8 @@ async function main() {
 	await check('extra billable request options stripped and multimodal requests rejected', async () => {
 		const body = managedBody({ model: 'test', messages: [{ role: 'user', content: 'hello', cache_control: {} }], max_tokens: 50000, n: 100, plugins: [{}], provider: {} });
 		assert.deepEqual({ max: body.max_tokens, n: body.n, plugins: body.plugins, cache: body.messages[0].cache_control }, { max: 4096, n: undefined, plugins: undefined, cache: undefined });
+		assert.equal(managedBody({ model: 'vendor/model:free', messages: [{ role: 'user', content: 'hello' }], max_tokens: 50000 }).max_tokens, 16000);
+		assert.equal(managedBody({ model: 'vendor/model:free', messages: [{ role: 'user', content: 'hello' }] }).max_tokens, 16000);
 		assert.throws(() => managedBody({ messages: [{ content: [{ type: 'image_url' }] }] }));
 	});
 	await check('balance ledger reconciles to current balance; snapshot excludes expired windows', async () => {
