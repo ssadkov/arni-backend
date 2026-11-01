@@ -35,6 +35,10 @@ model User {
   mediaGenerations MediaGeneration[]
   modelAccess   UserModelAccess[]
   budget        AccountBudget?
+  webChats      WebChat[]
+  webMemory     WebMemory?
+  webImages     WebImage[]
+  webLoginCodes WebLoginCode[]
 }
 
 model Identity {
@@ -224,6 +228,64 @@ model WaitlistEntry {
   contact   String   @unique // почта или Telegram
   source    String   @default("landing")
   createdAt DateTime @default(now())
+}
+
+// Browser chat. Message text stays out of UsageLog. Image bytes stay on this row.
+model WebChat {
+  id        String   @id @default(uuid())
+  userId    String
+  title     String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  WebMessage[]
+
+  @@index([userId, updatedAt])
+}
+
+model WebMessage {
+  id        String   @id @default(uuid())
+  chatId    String
+  role      String
+  text      String   @default("")
+  status    String   @default("complete")
+  sources   Json?
+  createdAt DateTime @default(now())
+  chat      WebChat  @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  images    WebImage[]
+
+  @@index([chatId, createdAt])
+}
+
+model WebMemory {
+  userId    String   @id
+  text      String   @default("")
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model WebImage {
+  id        String   @id @default(uuid())
+  userId    String
+  messageId String?
+  mediaType String
+  byteSize  Int
+  bytes     Bytes
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  message   WebMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// One-time browser login code. The JWT never travels in the redirect URL.
+model WebLoginCode {
+  id        String   @id @default(uuid())
+  userId    String
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
 }
 
 enum Plan {
