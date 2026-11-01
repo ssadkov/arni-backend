@@ -5,10 +5,15 @@ import prisma from '@/lib/prisma';
 import { modelIdForUser, modelsAllowedForUser } from '@/lib/llm/bedrockAccess';
 import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, managedModelMetadata } from '@/lib/llm/modelCapabilities';
 import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/lib/llm/openRouterCatalog';
+import { webCorsHeaders, webOptions } from '@/lib/webCors';
 
 function outputLimit(model: RouterModel): number {
 	const limit = zeroPrice(model) ? FREE_MAX_OUTPUT_TOKENS : MANAGED_MAX_OUTPUT_TOKENS;
 	return Math.min(model.top_provider?.max_completion_tokens || limit, limit);
+}
+
+export function OPTIONS(req: NextRequest) {
+	return webOptions(req);
 }
 
 export async function GET(req: NextRequest) {
@@ -19,9 +24,9 @@ export async function GET(req: NextRequest) {
 		if (auth?.startsWith('Bearer ')) {
 			let userId: string;
 			try { userId = (await decryptJWT(auth.slice(7))).userId; }
-			catch { return NextResponse.json({ error: 'Invalid Token' }, { status: 401 }); }
+			catch { return NextResponse.json({ error: 'Invalid Token' }, { status: 401, headers: webCorsHeaders(req) }); }
 			const user = await prisma.user.findUnique({ where: { id: userId }, include: { budget: true } });
-			if (!user || user.isBanned) { return NextResponse.json({ error: 'Account is blocked' }, { status: 403 }); }
+			if (!user || user.isBanned) { return NextResponse.json({ error: 'Account is blocked' }, { status: 403, headers: webCorsHeaders(req) }); }
 			managed = Boolean(user.budget);
 			if (managed) {
 				const allowed = await modelsAllowedForUser(userId);
@@ -44,10 +49,10 @@ export async function GET(req: NextRequest) {
 			arni_traffic: lights.get(model.id),
 		}));
 		return NextResponse.json({ arni_managed: managed, data: [...bedrock, ...models] }, {
-			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300' },
+			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },
 		});
 	} catch (error) {
 		console.error('Model catalog failed:', error instanceof Error ? error.name : 'unknown');
-		return NextResponse.json({ error: 'Failed to load models' }, { status: 503 });
+		return NextResponse.json({ error: 'Failed to load models' }, { status: 503, headers: webCorsHeaders(req) });
 	}
 }
