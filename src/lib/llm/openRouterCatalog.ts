@@ -4,6 +4,7 @@ export type RouterModel = {
 	id: string; name: string; context_length?: number;
 	architecture?: { input_modalities?: string[] };
 	supported_parameters?: string[];
+	reasoning?: { mandatory?: boolean };
 	top_provider?: { context_length?: number; max_completion_tokens?: number };
 	pricing?: { prompt?: string; completion?: string; request?: string; image?: string; input_cache_read?: string; input_cache_write?: string;
 		overrides?: Array<{ prompt?: string; completion?: string; input_cache_read?: string; input_cache_write?: string }> };
@@ -46,4 +47,19 @@ export function routerCacheMode(id: string): 'explicit' | 'automatic' | undefine
 	if (/^openai\/(?:gpt-(?:4o|4\.1|[56])|o[134](?:-|$))/.test(id)
 		|| ['google/gemini-2.5-flash-lite', 'google/gemini-2.5-flash', 'google/gemini-2.5-pro'].includes(id)) { return 'automatic'; }
 	return undefined;
+}
+
+/**
+ * Free models looped in their own reasoning until the output limit and never called a tool
+ * (Nemotron 3.5 Super VL, 2026-10-30: 47K characters of "Давайте начну"). Turn reasoning off
+ * for free models that allow it; models with mandatory reasoning keep it.
+ */
+export async function freeRequestBody<T extends { model?: unknown; reasoning?: unknown }>(body: T): Promise<T> {
+	if (typeof body.model !== 'string' || !body.model.endsWith(':free')) { return body; }
+	const model = (await routerCatalog()).find(row => row.id === body.model);
+	if (!model?.supported_parameters?.includes('reasoning') || model.reasoning?.mandatory) {
+		const { reasoning: _reasoning, ...rest } = body;
+		return rest as T;
+	}
+	return { ...body, reasoning: { enabled: false } };
 }

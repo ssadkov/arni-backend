@@ -22,7 +22,7 @@ import { usageStream } from '@/lib/usageStream';
 import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
 import { usageCostMicros } from '@/lib/budgetPolicy';
 import { modelCapabilities } from '@/lib/llm/modelCapabilities';
-import { routerCatalog, routerModel, zeroPrice } from '@/lib/llm/openRouterCatalog';
+import { freeRequestBody, routerCatalog, routerModel, zeroPrice } from '@/lib/llm/openRouterCatalog';
 
 export const maxDuration = 300;
 
@@ -214,7 +214,7 @@ export async function POST(req: NextRequest) {
     upstreamDispatched = true;
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel, catalogPrice)
-      : await completeWithOpenRouter(body);
+      : await completeWithOpenRouter(await freeRequestBody(body));
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.
@@ -229,7 +229,7 @@ export async function POST(req: NextRequest) {
         routedFrom = routed.routedFrom;
         body.model = routed.model;
         trackedModel = routed.model;
-        response = await completeWithOpenRouter(body);
+        response = await completeWithOpenRouter(await freeRequestBody(body));
       } else {
         if (budgetReservationId) { await settleBudget(budgetReservationId, null); }
         if (reservedUserId) {

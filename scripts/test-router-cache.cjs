@@ -26,3 +26,21 @@ const routed = chooseRoutedModel('broken/vision:free', new Map([['broken/vision:
 assert.equal(routed.model, 'vision:free');
 assert.equal(chooseRoutedModel('broken/vision:free', new Map([['broken/vision:free', 'red'], ['vision:free', 'unknown']]), ['vision:free']).model, 'vision:free');
 console.log('PASS explicit cache markers, provider-specific capability, cache usage normalization, zero-price validation and vision-safe fallback');
+
+(async () => {
+	const { freeRequestBody } = require('../src/lib/llm/openRouterCatalog.ts');
+	const catalog = [
+		{ id: 'loops/model:free', supported_parameters: ['tools', 'reasoning'], reasoning: { mandatory: false } },
+		{ id: 'always/thinks:free', supported_parameters: ['tools', 'reasoning'], reasoning: { mandatory: true } },
+		{ id: 'plain/model:free', supported_parameters: ['tools'] },
+	];
+	global.fetch = async () => ({ ok: true, json: async () => ({ data: catalog }) });
+	const body = { model: 'loops/model:free', messages: [] };
+	assert.deepEqual((await freeRequestBody(body)).reasoning, { enabled: false });
+	assert.equal(body.reasoning, undefined, 'the request object is not mutated');
+	assert.equal('reasoning' in await freeRequestBody({ model: 'always/thinks:free', reasoning: { enabled: false } }), false);
+	assert.equal('reasoning' in await freeRequestBody({ model: 'plain/model:free' }), false);
+	const paid = { model: 'vendor/paid', reasoning: { effort: 'high' } };
+	assert.equal(await freeRequestBody(paid), paid);
+	console.log('PASS free models run without reasoning unless it is mandatory');
+})().catch(error => { console.error(error); process.exit(1); });
