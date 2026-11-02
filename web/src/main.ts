@@ -140,38 +140,71 @@ function limitsHtml() {
   </dl></div>`;
 }
 
+function setChatsOpen(open: boolean) {
+  document.querySelector('#sidebar')?.classList.toggle('open', open);
+  document.querySelector('#backdrop')?.classList.toggle('open', open);
+}
+
 function renderApp() {
   app!.innerHTML = `<div class="shell">
-    <aside class="sidebar" id="sidebar">
-      <button id="new-chat" class="primary" type="button">Новый чат</button>
-      <div class="chats" id="chat-list"></div>
-      <label>Память<textarea id="memory" maxlength="4000" placeholder="Короткие факты, которые бот должен помнить"></textarea></label>
-      <button id="save-memory" type="button">Сохранить память</button>
-    </aside>
-    <main class="main">
-      <div class="limits">${limitsHtml()}<button id="sign-out" type="button">Выйти</button></div>
+    <header class="topbar">
       <button id="show-chats" class="menu" type="button">Чаты</button>
-      <div class="thread" id="thread"></div>
-      <form class="composer" id="composer">
-        <select id="model"></select>
-        <textarea id="input" placeholder="Сообщение"></textarea>
+      <strong class="brand">Arni</strong>
+      <div class="top-actions">
+        <button id="show-memory" type="button">Память</button>
+        <button id="sign-out" type="button">Выйти</button>
+      </div>
+    </header>
+    <div class="limits" id="limits">${limitsHtml()}</div>
+    <div class="workspace">
+      <aside class="sidebar" id="sidebar">
+        <button id="new-chat" class="primary" type="button">Новый чат</button>
+        <div class="chats" id="chat-list"></div>
+      </aside>
+      <button id="backdrop" class="backdrop" type="button" aria-label="Закрыть список чатов"></button>
+      <main class="main">
+        <div class="thread" id="thread"></div>
+        <form class="composer" id="composer">
+          <select id="model" aria-label="Модель"></select>
+          <textarea id="input" placeholder="Сообщение" rows="2"></textarea>
+          <div class="actions">
+            <label class="file"><input id="file" type="file" accept="image/png,image/jpeg" hidden />Картинка</label>
+            <span id="file-name" class="muted"></span>
+            <button id="send" class="primary" type="submit">Отправить</button>
+            <button id="draw" type="button">Нарисовать</button>
+          </div>
+          <p id="status" class="error"></p>
+        </form>
+      </main>
+    </div>
+    <dialog id="memory-dialog">
+      <form method="dialog" class="memory-form">
+        <h2>Память аккаунта</h2>
+        <p class="muted">Один текст для всех чатов. Бот видит его в каждом разговоре.</p>
+        <textarea id="memory" maxlength="4000" placeholder="Короткие факты, которые бот должен помнить"></textarea>
+        <p id="memory-status" class="muted"></p>
         <div class="actions">
-          <label><input id="file" type="file" accept="image/png,image/jpeg" hidden />Картинка</label>
-          <span id="file-name" class="muted"></span>
-          <button id="send" class="primary" type="submit">Отправить</button>
-          <button id="draw" type="button">Нарисовать</button>
+          <button id="save-memory" class="primary" type="button" value="">Сохранить</button>
+          <button id="close-memory" type="submit" value="cancel">Закрыть</button>
         </div>
-        <p id="status" class="error"></p>
       </form>
-    </main>
+    </dialog>
   </div>`;
   document.querySelector('#sign-out')?.addEventListener('click', signOut);
   document.querySelector('#new-chat')?.addEventListener('click', () => void createChat());
+  document.querySelector('#show-memory')?.addEventListener('click', () => void openMemory());
   document.querySelector('#save-memory')?.addEventListener('click', () => void saveMemory());
-  document.querySelector('#show-chats')?.addEventListener('click', () => document.querySelector('#sidebar')?.classList.toggle('open'));
+  document.querySelector('#show-chats')?.addEventListener('click', () => setChatsOpen(!document.querySelector('#sidebar')?.classList.contains('open')));
+  document.querySelector('#backdrop')?.addEventListener('click', () => setChatsOpen(false));
   document.querySelector<HTMLFormElement>('#composer')?.addEventListener('submit', event => {
     event.preventDefault();
     void send(false);
+  });
+  document.querySelector<HTMLTextAreaElement>('#input')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      void send(false);
+    }
   });
   document.querySelector('#draw')?.addEventListener('click', () => void send(true));
   document.querySelector<HTMLInputElement>('#file')?.addEventListener('change', () => void attachFile());
@@ -181,7 +214,24 @@ function renderApp() {
   paintChats();
   paintModels();
   paintMessages();
-  void loadMemory();
+}
+
+function paintLimits() {
+  const limits = document.querySelector('#limits');
+  if (limits) {
+    limits.innerHTML = limitsHtml();
+  }
+}
+
+async function openMemory() {
+  const dialog = document.querySelector<HTMLDialogElement>('#memory-dialog');
+  const status = document.querySelector('#memory-status');
+  if (status) {
+    status.textContent = '';
+    status.classList.remove('error');
+  }
+  dialog?.showModal();
+  await loadMemory();
 }
 
 function paintChats() {
@@ -189,7 +239,9 @@ function paintChats() {
   if (!list) {
     return;
   }
-  list.innerHTML = chats.map(chat => `<button type="button" data-id="${chat.id}" class="${chat.id === activeId ? 'active' : ''}">${escapeHtml(chat.title || 'Новый чат')}</button>`).join('');
+  list.innerHTML = chats.length
+    ? chats.map(chat => `<button type="button" data-id="${chat.id}" class="${chat.id === activeId ? 'active' : ''}">${escapeHtml(chat.title || 'Новый чат')}</button>`).join('')
+    : '<p class="muted empty">Пока нет чатов</p>';
   list.querySelectorAll('button').forEach(button => button.addEventListener('click', () => void openChat(button.dataset.id || '')));
 }
 
@@ -206,6 +258,10 @@ function paintModels() {
 function paintMessages() {
   const thread = document.querySelector('#thread');
   if (!thread) {
+    return;
+  }
+  if (!messages.length) {
+    thread.innerHTML = '<p class="muted empty-thread">Напишите сообщение. Enter отправляет, Shift+Enter переносит строку.</p>';
     return;
   }
   thread.innerHTML = messages.map(message => {
@@ -268,7 +324,7 @@ async function openChat(id: string) {
   messages = body.messages;
   paintChats();
   paintMessages();
-  document.querySelector('#sidebar')?.classList.remove('open');
+  setChatsOpen(false);
 }
 
 async function createChat() {
@@ -282,6 +338,7 @@ async function createChat() {
   messages = [];
   paintChats();
   paintMessages();
+  setChatsOpen(false);
 }
 
 async function loadMemory() {
@@ -299,10 +356,12 @@ async function loadMemory() {
 async function saveMemory() {
   const field = document.querySelector<HTMLTextAreaElement>('#memory');
   const response = await api('/api/web/memory', { method: 'PUT', body: JSON.stringify({ text: field?.value || '' }) });
-  const status = document.querySelector('#status');
-  if (status) {
-    status.textContent = response.ok ? '' : await errorMessage(response);
+  const status = document.querySelector('#memory-status');
+  if (!status) {
+    return;
   }
+  status.classList.toggle('error', !response.ok);
+  status.textContent = response.ok ? 'Сохранено' : await errorMessage(response);
 }
 
 async function attachFile() {
@@ -365,11 +424,7 @@ async function send(draw: boolean) {
     }
     await openChat(activeId);
     await refreshAccount();
-    const limits = document.querySelector('.main .limits');
-    if (limits) {
-      limits.innerHTML = `${limitsHtml()}<button id="sign-out" type="button">Выйти</button>`;
-      document.querySelector('#sign-out')?.addEventListener('click', signOut);
-    }
+    paintLimits();
     return;
   }
   const response = await api(`/api/web/chats/${activeId}/messages`, {
@@ -387,6 +442,14 @@ async function send(draw: boolean) {
     input.value = '';
   }
   pendingImage = null;
+  const fileName = document.querySelector('#file-name');
+  if (fileName) {
+    fileName.textContent = '';
+  }
+  const fileInput = document.querySelector<HTMLInputElement>('#file');
+  if (fileInput) {
+    fileInput.value = '';
+  }
   const draft: Message = { id: `local-${Date.now()}`, role: 'assistant', text: '', status: 'complete', sources: [], images: [] };
   messages.push({ id: `user-${Date.now()}`, role: 'user', text, status: 'complete', sources: [], images: [] });
   messages.push(draft);
@@ -429,11 +492,7 @@ async function send(draw: boolean) {
   sending = false;
   await refreshChats();
   await refreshAccount();
-  const limits = document.querySelector('.main .limits');
-  if (limits) {
-    limits.outerHTML = limitsHtml();
-    document.querySelector('#sign-out')?.addEventListener('click', signOut);
-  }
+  paintLimits();
 }
 
 function signOut() {
