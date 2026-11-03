@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import prisma from '@/lib/prisma';
+import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 import { freeStepSnapshot } from '@/lib/freeSteps';
 import ProviderSelect from './ProviderSelect';
 import UserActions from './UserActions';
@@ -11,6 +12,7 @@ export default async function UsersPage() {
   let users: Prisma.UserGetPayload<{ include: { identities: true; budget: true } }>[] = [];
   let dbError = false;
   const spentByUser = new Map<string, number>();
+  const ratesPromise = billingRates();
 
   try {
     const [found, spend] = await Promise.all([
@@ -31,6 +33,7 @@ export default async function UsersPage() {
   } catch {
     dbError = true;
   }
+  const rates = await ratesPromise;
 
   return (
     <div className="space-y-6">
@@ -94,7 +97,7 @@ export default async function UsersPage() {
                   </div>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
-                  {user.budget && <div className="text-sm font-mono text-indigo-700">API ${(user.budget.balanceMicros / 1_000_000).toFixed(2)} {user.budget.enabled ? '' : '(пауза)'}</div>}
+                  {user.budget && <div className="text-sm font-mono text-indigo-700">API {formatBillingRub(user.budget.balanceMicros, rates.RUB, 2)} {user.budget.enabled ? '' : '(пауза)'}</div>}
                   <div className="text-sm text-gray-900 font-mono">токенов {user.tokenBalance.toLocaleString('ru-RU')}</div>
                   <div className="text-xs text-gray-500 font-mono">потрачено {spent.toLocaleString('ru-RU')}</div>
                   <div className="text-xs text-gray-500 font-mono">выделено {(user.tokenBalance + spent).toLocaleString('ru-RU')}</div>

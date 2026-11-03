@@ -6,6 +6,7 @@ import { modelIdForUser, modelsAllowedForUser } from '@/lib/llm/bedrockAccess';
 import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, managedModelMetadata } from '@/lib/llm/modelCapabilities';
 import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/lib/llm/openRouterCatalog';
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
+import { billingRates } from '@/lib/billingCurrency';
 
 function outputLimit(model: RouterModel): number {
 	const limit = zeroPrice(model) ? FREE_MAX_OUTPUT_TOKENS : MANAGED_MAX_OUTPUT_TOKENS;
@@ -42,13 +43,13 @@ export async function GET(req: NextRequest) {
 		let router: RouterModel[];
 		try { router = await routerCatalog(); }
 		catch (error) { if (!bedrock.length) { throw error; } router = []; }
-		const lights = await trafficByModel(WATCHED_FREE_MODELS);
+		const [lights, rates] = await Promise.all([trafficByModel(WATCHED_FREE_MODELS), billingRates()]);
 		const models = router.filter(model => managed ? model.architecture?.input_modalities?.includes('text') : zeroPrice(model)).map(model => ({
 			...model, arni_provider: 'openrouter', arni_free: zeroPrice(model), arni_cache: routerCacheMode(model.id),
 			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
 			arni_traffic: lights.get(model.id),
 		}));
-		return NextResponse.json({ arni_managed: managed, data: [...bedrock, ...models] }, {
+		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...bedrock, ...models] }, {
 			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },
 		});
 	} catch (error) {

@@ -14,6 +14,7 @@ process.env.PRISMA_DATABASE_URL = db;
 process.env.DATABASE_URL = db;
 process.env.ADMIN_USER = 'billing-test';
 process.env.ADMIN_PASS = 'local-test-only';
+process.env.JWT_SECRET = 'local-disposable-test-secret-with-at-least-32-characters';
 
 const resolveFilename = Module._resolveFilename;
 Module._resolveFilename = function (name, parent, ...rest) {
@@ -34,6 +35,10 @@ const { POST: grant } = require('../src/app/api/admin/users/[id]/budget/route.ts
 const { POST: reconcile } = require('../src/app/api/admin/users/[id]/budget/reconcile/route.ts');
 const { NextRequest } = require('next/server');
 const { requireAdmin } = require('../src/lib/adminAuth.ts');
+const { GET: getUsage } = require('../src/app/api/account/usage/route.ts');
+const { encryptJWT } = require('../src/lib/jwt.ts');
+const { randomUUID } = require('node:crypto');
+const { billingRates } = require('../src/lib/billingCurrency.ts');
 
 let passed = 0;
 async function check(name, run) { await run(); passed++; console.log(`PASS ${name}`); }
@@ -158,6 +163,32 @@ async function main() {
 		await monitored.completed;
 		assert.deepEqual(settled, [{ prompt_tokens: 20, completion_tokens: 10, cost: undefined }]);
 	});
+	await check('stream holds a split terminal marker until chat cost is recorded', async () => {
+		const encoder = new TextEncoder();
+		const input = new ReadableStream({
+			start(controller) {
+				controller.enqueue(encoder.encode('data: {"usage":{"prompt_tokens":20,"completion_tokens":10}}\n\ndata: [DO'));
+				controller.enqueue(encoder.encode('NE]\n\n'));
+				controller.close();
+			},
+		});
+		let release;
+		const pending = new Promise(resolve => { release = resolve; });
+		const settlements = [];
+		const monitored = usageStream(input, async usage => { settlements.push(usage); await pending; });
+		const reader = monitored.stream.getReader();
+		await reader.read();
+		let terminalReceived = false;
+		const terminal = reader.read().then(result => { terminalReceived = true; return result; });
+		try {
+			await new Promise(resolve => setImmediate(resolve));
+			assert.equal(terminalReceived, false);
+			assert.deepEqual(settlements, [{ prompt_tokens: 20, completion_tokens: 10, cost: undefined }]);
+		} finally { release(); }
+		assert.equal(new TextDecoder().decode((await terminal).value), 'NE]\n\n');
+		await monitored.completed;
+		assert.equal(settlements.length, 1);
+	});
 	await check('extra billable request options stripped and multimodal requests rejected', async () => {
 		const body = managedBody({ model: 'test', messages: [{ role: 'user', content: 'hello', cache_control: {} }], max_tokens: 50000, n: 100, plugins: [{}], provider: {} });
 		assert.deepEqual({ max: body.max_tokens, n: body.n, plugins: body.plugins, cache: body.messages[0].cache_control }, { max: 4096, n: undefined, plugins: undefined, cache: undefined });
@@ -274,6 +305,64 @@ async function main() {
 		const before = calls;
 		assert.equal((await chat(request(false))).status, 429);
 		assert.equal(calls, before);
+	});
+	await check('display rates account for foreign currency nominal and use USD when the feed is unavailable', async () => {
+		const originalFetch = global.fetch;
+		const originalRub = process.env.ARNI_USD_TO_RUB;
+		const originalKzt = process.env.ARNI_USD_TO_KZT;
+		delete process.env.ARNI_USD_TO_RUB;
+		delete process.env.ARNI_USD_TO_KZT;
+		try {
+			global.fetch = async url => {
+				assert.equal(url, 'https://www.cbr.ru/scripts/XML_daily.asp');
+				return new Response('<ValCurs><Valute ID="a"><CharCode>USD</CharCode><Nominal>1</Nominal><Value>80,0000</Value></Valute>'
+					+ '<Valute ID="b"><CharCode>KZT</CharCode><Nominal>100</Nominal><Value>16,0000</Value></Valute></ValCurs>');
+			};
+			assert.deepEqual(await billingRates(), { USD: 1, RUB: 80, KZT: 500 });
+			process.env.ARNI_USD_TO_RUB = '90';
+			assert.deepEqual(await billingRates(), { USD: 1, RUB: 90, KZT: 500 });
+			global.fetch = async () => { throw new Error('offline'); };
+			assert.deepEqual(await billingRates(), { USD: 1, RUB: 90, KZT: null });
+		} finally {
+			global.fetch = originalFetch;
+			if (originalRub === undefined) { delete process.env.ARNI_USD_TO_RUB; } else { process.env.ARNI_USD_TO_RUB = originalRub; }
+			if (originalKzt === undefined) { delete process.env.ARNI_USD_TO_KZT; } else { process.env.ARNI_USD_TO_KZT = originalKzt; }
+		}
+	});
+	await check('RUB grants use the quoted rate and replay without double credit', async () => {
+		const rubUser = await prisma.user.create({ data: { email: 'rub-grant@billing-test.invalid' } });
+		process.env.ARNI_USD_TO_RUB = '100';
+		process.env.ARNI_USD_TO_KZT = '500';
+		const { grantUsd, fiveHourUsd, weeklyUsd, ...settings } = defaults;
+		const payload = { ...settings, key: randomUUID(), rubRate: 100, rubKopecks: [99_900, 20_000, 50_000] };
+		assert.equal((await grantRequest(rubUser.id, payload)).status, 200);
+		process.env.ARNI_USD_TO_RUB = '110';
+		assert.equal((await grantRequest(rubUser.id, payload)).status, 200);
+		assert.equal((await grantRequest(rubUser.id, { ...payload, key: randomUUID() })).status, 409);
+		const budget = await prisma.accountBudget.findUniqueOrThrow({ where: { userId: rubUser.id } });
+		assert.equal(budget.balanceMicros, 9_990_000);
+	});
+	await check('chat totals distinguish zero-cost usage from missing data and filter by owner', async () => {
+		const first = await prisma.user.create({ data: { email: 'first-chat@billing-test.invalid' } });
+		const second = await prisma.user.create({ data: { email: 'second-chat@billing-test.invalid' } });
+		const row = { chatId: 'chat-123', promptTokens: 10, completionTokens: 20, operation: 'chat' };
+		await prisma.usageLog.createMany({ data: [
+			{ ...row, userId: first.id, model: 'test:free', costMicros: 0 },
+			{ ...row, userId: second.id, model: 'test:paid', costMicros: 42_000 },
+			{ ...row, userId: second.id, model: 'test:paid', chatId: 'unknown-cost' },
+		] });
+		async function summary(userId, chatId) {
+			const token = await encryptJWT({ userId });
+			const response = await getUsage(new NextRequest('http://localhost/api/account/usage?summary=1&chatId=' + chatId,
+				{ headers: { Authorization: 'Bearer ' + token } }));
+			assert.equal(response.status, 200);
+			return response.json();
+		}
+		assert.deepEqual(await Promise.all([summary(first.id, row.chatId), summary(second.id, row.chatId), summary(second.id, 'unknown-cost')]), [
+			{ totalMicros: 0, requestCount: 1, pricedRequests: 1 },
+			{ totalMicros: 42_000, requestCount: 1, pricedRequests: 1 },
+			{ totalMicros: null, requestCount: 1, pricedRequests: 0 },
+		]);
 	});
 	console.log(`${passed} billing checks passed on disposable PostgreSQL.`);
 }
