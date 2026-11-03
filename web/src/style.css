@@ -140,7 +140,25 @@ button.primary:hover:not(:disabled), .actions a.primary:hover { opacity: 0.8; }
   background: var(--surface);
 }
 .bubble img { display: block; max-width: min(20rem, 100%); max-height: 20rem; margin-top: 0.5rem; border-radius: 0.75rem; object-fit: contain; }
-.bubble pre { overflow: auto; padding: 0.75rem; border-radius: 0.75rem; background: var(--surface); }
+.message-text > * { margin-block: 0 0.75rem; }
+.message-text > :last-child { margin-bottom: 0; }
+.message-text :is(h1, h2, h3, h4, h5, h6) { line-height: 1.3; }
+.message-text h1 { font-size: 1.5rem; }
+.message-text h2 { font-size: 1.25rem; }
+.message-text :is(h3, h4, h5, h6) { font-size: 1.0625rem; }
+.message-text :is(ul, ol) { padding-inline-start: 1.5rem; }
+.message-text li + li { margin-top: 0.25rem; }
+.message-text li > :is(p, ul, ol) { margin-block: 0.25rem; }
+.message-text blockquote { margin-inline: 0; padding-inline-start: 0.875rem; border-inline-start: 3px solid var(--line); color: var(--muted); }
+.message-text hr { border: 0; border-top: 1px solid var(--line); }
+.message-text pre { overflow: auto; padding: 0.75rem; border-radius: 0.75rem; background: var(--surface); }
+.message-text code { font-size: 0.875em; }
+.message-text :not(pre) > code { padding: 0.125em 0.25em; border-radius: 0.25rem; background: var(--surface); }
+.bubble.user .message-text :is(pre, :not(pre) > code) { background: var(--hover); }
+.markdown-table { overflow-x: auto; }
+.markdown-table table { width: 100%; border-collapse: collapse; font-size: 0.9375rem; }
+.markdown-table :is(th, td) { border: 1px solid var(--line); padding: 0.5rem 0.75rem; text-align: start; vertical-align: top; }
+.markdown-table th { background: var(--surface); }
 .sources { margin: 0.625rem 0 0; padding-left: 1.25rem; font-size: 0.875rem; }
 
 .composer {

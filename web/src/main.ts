@@ -1,4 +1,5 @@
 import './style.css';
+import { renderMarkdown } from './markdown';
 
 const API = (import.meta.env.VITE_API_ORIGIN || 'https://api.arnion.ru').replace(/\/$/, '');
 const TOKEN_KEY = 'arni.web.token';
@@ -71,13 +72,6 @@ function usd(micros: number) {
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char] || char));
-}
-
-function renderText(value: string) {
-  const escaped = escapeHtml(value);
-  return escaped.split('```').map((part, index) => index % 2 === 1
-    ? `<pre><code>${part.replace(/^\w+\n/, '')}</code></pre>`
-    : part.replace(/\n/g, '<br>')).join('');
 }
 
 async function api(path: string, init: RequestInit = {}) {
@@ -477,7 +471,7 @@ function paintMessages() {
     const images = message.images.map(image => `<img data-image="${escapeHtml(image.id)}" alt="${message.role === 'user' ? 'Прикреплённое изображение' : 'Изображение от Арни'}" />`).join('');
     const links = message.sources?.filter(hit => /^https?:\/\//i.test(hit.url));
     const sources = links?.length ? `<ol class="sources">${links.map(hit => `<li><a href="${escapeHtml(hit.url)}" target="_blank" rel="noreferrer">${escapeHtml(hit.title)}</a></li>`).join('')}</ol>` : '';
-    return `<article class="bubble ${message.role === 'user' ? 'user' : ''}" aria-label="${message.role === 'user' ? 'Вы' : 'Арни'}">${renderText(message.text)}${images}${sources}${message.status === 'incomplete' ? '<p class="muted">Ответ оборвался.</p>' : ''}</article>`;
+    return `<article class="bubble ${message.role === 'user' ? 'user' : ''}" aria-label="${message.role === 'user' ? 'Вы' : 'Арни'}"><div class="message-text">${renderMarkdown(message.text)}</div>${images}${sources}${message.status === 'incomplete' ? '<p class="muted">Ответ оборвался.</p>' : ''}</article>`;
   }).join('');
   thread.querySelectorAll<HTMLImageElement>('img[data-image]').forEach(image => {
     void loadImage(image);
@@ -777,10 +771,10 @@ async function streamReply(body: ReadableStream<Uint8Array>, text: string, image
     if (draft.text) {
       setStatus('');
     }
-    const reply = document.querySelector('#thread article:last-child');
+    const reply = document.querySelector('#thread article:last-child .message-text');
     if (reply) {
-      reply.innerHTML = renderText(draft.text);
-      const thread = reply.parentElement!;
+      reply.innerHTML = renderMarkdown(draft.text);
+      const thread = document.querySelector('#thread')!;
       thread.scrollTop = thread.scrollHeight;
     }
     if (done) {
