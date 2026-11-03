@@ -313,14 +313,21 @@ async function main() {
 		delete process.env.ARNI_USD_TO_RUB;
 		delete process.env.ARNI_USD_TO_KZT;
 		try {
+			const urls = [];
+			const beforeMoscowMidnight = new Date('2026-11-03T20:59:59Z');
+			const atMoscowMidnight = new Date('2026-11-03T21:00:00Z');
 			global.fetch = async url => {
-				assert.equal(url, 'https://www.cbr.ru/scripts/XML_daily.asp');
+				urls.push(url);
 				return new Response('<ValCurs><Valute ID="a"><CharCode>USD</CharCode><Nominal>1</Nominal><Value>80,0000</Value></Valute>'
 					+ '<Valute ID="b"><CharCode>KZT</CharCode><Nominal>100</Nominal><Value>16,0000</Value></Valute></ValCurs>');
 			};
-			assert.deepEqual(await billingRates(), { USD: 1, RUB: 80, KZT: 500 });
+			assert.deepEqual(await billingRates(beforeMoscowMidnight), { USD: 1, RUB: 80, KZT: 500 });
 			process.env.ARNI_USD_TO_RUB = '90';
-			assert.deepEqual(await billingRates(), { USD: 1, RUB: 90, KZT: 500 });
+			assert.deepEqual(await billingRates(atMoscowMidnight), { USD: 1, RUB: 90, KZT: 500 });
+			assert.deepEqual(urls, [
+				'https://www.cbr.ru/scripts/XML_daily.asp?date_req=03/11/2026',
+				'https://www.cbr.ru/scripts/XML_daily.asp?date_req=04/11/2026',
+			]);
 			global.fetch = async () => { throw new Error('offline'); };
 			assert.deepEqual(await billingRates(), { USD: 1, RUB: 90, KZT: null });
 		} finally {

@@ -3,8 +3,14 @@ function rate(value: string | number | undefined) {
 	return Number.isFinite(parsed) && parsed > 0 && parsed <= 100_000 ? parsed : null;
 }
 
-async function centralBankRates() {
-	const response = await fetch('https://www.cbr.ru/scripts/XML_daily.asp', {
+const quoteDate = new Intl.DateTimeFormat('en-GB', {
+	timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit', year: 'numeric',
+});
+
+async function centralBankRates(now: Date) {
+	// The undated feed can already contain tomorrow's rates.
+	const url = 'https://www.cbr.ru/scripts/XML_daily.asp?date_req=' + quoteDate.format(now);
+	const response = await fetch(url, {
 		next: { revalidate: 3600 }, signal: AbortSignal.timeout(3000),
 	});
 	if (!response.ok) { return null; }
@@ -23,10 +29,10 @@ async function centralBankRates() {
 	return { RUB, KZT: RUB && tengeInRubles ? rate(RUB / tengeInRubles) : null };
 }
 
-export async function billingRates() {
+export async function billingRates(now = new Date()) {
 	const RUB = rate(process.env.ARNI_USD_TO_RUB);
 	const KZT = rate(process.env.ARNI_USD_TO_KZT);
-	const daily = RUB && KZT ? null : await centralBankRates().catch(() => null);
+	const daily = RUB && KZT ? null : await centralBankRates(now).catch(() => null);
 	return { USD: 1, RUB: RUB ?? daily?.RUB ?? null, KZT: KZT ?? daily?.KZT ?? null };
 }
 
