@@ -1,5 +1,6 @@
 import prisma from '@/lib/prisma';
 import { utcDayKey } from '@/lib/freeSteps';
+import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,6 +13,7 @@ export default async function AdminDashboard() {
   let dbError = false;
   let recordedCostMicros = 0;
   let unpricedRequests = 0;
+  const ratesPromise = billingRates();
 
   try {
     // Independent queries: run them together instead of paying six database round trips in a row.
@@ -45,6 +47,7 @@ export default async function AdminDashboard() {
   } catch (error) {
     dbError = true;
   }
+  const rates = await ratesPromise;
 
   return (
     <div className="space-y-6">
@@ -88,7 +91,7 @@ export default async function AdminDashboard() {
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
           <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Учтённые расходы API</h3>
           <p className="mt-2 text-3xl font-bold text-emerald-600">
-            ${(recordedCostMicros / 1_000_000).toFixed(4)}
+            {formatBillingRub(recordedCostMicros, rates.RUB)}
           </p>
           <p className="text-xs text-gray-400 mt-1">По usage и сохранённым тарифам; без цены: {unpricedRequests} записей. Оборванные запросы могут включать оценку резерва.</p>
           <a href="/api/admin/usage/export" className="text-sm text-indigo-600 hover:text-indigo-800">Скачать расходы за 30 дней (CSV)</a>

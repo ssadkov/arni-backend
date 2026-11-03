@@ -4,6 +4,7 @@ import prisma from '@/lib/prisma';
 import UserModels from './UserModels';
 import UserBudget, { ReconcileReservation } from './UserBudget';
 import { budgetSnapshot } from '@/lib/budget';
+import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,19 +18,21 @@ export default async function UserAccessPage({ params }: { params: Promise<{ id:
 		notFound();
 	}
 
-	const [models, spent, apiUsage] = await Promise.all([
+	const [models, spent, apiUsage, rates] = await Promise.all([
 		prisma.bedrockModel.findMany(),
 		prisma.usageLog.aggregate({
 			where: { userId: id, NOT: { model: { endsWith: ':free' } }, OR: [{ accounting: null }, { accounting: 'legacy' }] },
 			_sum: { promptTokens: true, completionTokens: true },
 		}),
 		prisma.usageLog.aggregate({ where: { userId: id, accounting: { in: ['reported', 'estimated'] } }, _sum: { costMicros: true, promptTokens: true, completionTokens: true } }),
+		billingRates(),
 	]);
 
 	const spentTokens = (spent._sum.promptTokens || 0) + (spent._sum.completionTokens || 0);
 	const grants = new Map(user.modelAccess.map((grant) => [grant.modelId, grant.enabled]));
 	const budget = user.budget ? budgetSnapshot(user.budget) : null;
-	const money = (micros: number) => `$${(micros / 1_000_000).toFixed(4)}`;
+	const money = (micros: number) => formatBillingRub(micros, rates.RUB);
+	const modelPrice = (usd: number | null) => formatBillingRub(usd === null ? null : usd * 1_000_000, rates.RUB);
 	models.sort((a, b) => {
 		if (a.outputPerMillion == null && b.outputPerMillion == null) {
 			return a.name.localeCompare(b.name);
@@ -57,7 +60,7 @@ export default async function UserAccessPage({ params }: { params: Promise<{ id:
 					return <div key={String(label)} className="bg-white border rounded-xl p-4"><div className="text-sm text-gray-500">{String(label)}</div><div className="font-mono">{money(window.usedMicros)} / {money(window.limitMicros)}</div><div className="text-sm">Запросы: {window.requests} / {window.requestLimit}</div><div className="text-xs text-gray-500">{window.resetsAt ? `Сброс ${new Date(window.resetsAt).toLocaleString('ru-RU', { timeZone: 'Asia/Qyzylorda' })}` : 'Начнётся с первого запроса'}</div></div>;
 				})}
 			</div>}
-			<UserBudget userId={user.id} budget={user.budget ? { enabled: user.budget.enabled, fiveHourLimitMicros: user.budget.fiveHourLimitMicros, weeklyLimitMicros: user.budget.weeklyLimitMicros, fiveHourRequestLimit: user.budget.fiveHourRequestLimit, weeklyRequestLimit: user.budget.weeklyRequestLimit } : null} />
+			<UserBudget key={rates.RUB ?? 'USD'} userId={user.id} rubRate={rates.RUB} budget={user.budget ? { enabled: user.budget.enabled, fiveHourLimitMicros: user.budget.fiveHourLimitMicros, weeklyLimitMicros: user.budget.weeklyLimitMicros, fiveHourRequestLimit: user.budget.fiveHourRequestLimit, weeklyRequestLimit: user.budget.weeklyRequestLimit } : null} />
 			{budget && <p className="text-sm text-gray-600">Всего в новом учёте: {money(apiUsage._sum.costMicros || 0)}; входных токенов {(apiUsage._sum.promptTokens || 0).toLocaleString('ru-RU')}, выходных {(apiUsage._sum.completionTokens || 0).toLocaleString('ru-RU')}. При отсутствии usage токены остаются неизвестными, расход помечается как оценочный.</p>}
 			{user.budget && <div className="bg-white border rounded-xl p-4 space-y-4 overflow-x-auto">
 				<h3 className="font-semibold">Последние расходы API</h3>
@@ -92,8 +95,8 @@ export default async function UserAccessPage({ params }: { params: Promise<{ id:
 					return {
 						id: model.id,
 						name: model.name,
-						inputPerMillion: model.inputPerMillion,
-						outputPerMillion: model.outputPerMillion,
+						inputPrice: modelPrice(model.inputPerMillion),
+						outputPrice: modelPrice(model.outputPerMillion),
 						globalEnabled: model.enabled,
 						mode: grant === undefined ? 'default' as const : grant ? 'on' as const : 'off' as const,
 					};

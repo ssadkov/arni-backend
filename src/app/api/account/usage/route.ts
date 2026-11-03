@@ -16,6 +16,11 @@ export async function GET(req: NextRequest) {
 	const chatId = req.nextUrl.searchParams.get('chatId');
 	if (chatId && !/^[a-zA-Z0-9:._/-]{1,200}$/.test(chatId)) { return NextResponse.json({ error: 'Invalid chat ID' }, { status: 400 }); }
 	const where = { userId, ...(chatId ? { chatId } : {}) };
+	if (req.nextUrl.searchParams.get('summary') === '1') {
+		const total = await prisma.usageLog.aggregate({ where, _sum: { costMicros: true }, _count: { _all: true, costMicros: true } });
+		return NextResponse.json({ totalMicros: total._sum.costMicros, requestCount: total._count._all, pricedRequests: total._count.costMicros },
+			{ headers: { 'Cache-Control': 'private, no-store' } });
+	}
 	const [total, models, requests] = await Promise.all([
 		prisma.usageLog.aggregate({ where, _sum: { costMicros: true }, _count: true }),
 		prisma.usageLog.groupBy({ by: ['model'], where, _sum: { costMicros: true, promptTokens: true, completionTokens: true, cacheReadTokens: true }, _count: true }),

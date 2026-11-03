@@ -6,18 +6,11 @@ import { useRouter } from 'next/navigation';
 type Row = {
 	id: string;
 	name: string;
-	inputPerMillion: number | null;
-	outputPerMillion: number | null;
+	inputPrice: string;
+	outputPrice: string;
 	globalEnabled: boolean;
 	mode: 'default' | 'on' | 'off';
 };
-
-function money(value: number | null) {
-	if (value == null) {
-		return '—';
-	}
-	return `$${value >= 1 ? value.toFixed(2) : value.toFixed(4)}`;
-}
 
 export default function UserModels({
 	userId,
@@ -81,8 +74,8 @@ export default function UserModels({
 					<thead className="bg-gray-50">
 						<tr>
 							<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Модель</th>
-							<th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">$/1M in</th>
-							<th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">$/1M out</th>
+							<th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Вход / 1 млн</th>
+							<th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Выход / 1 млн</th>
 							<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Доступ</th>
 						</tr>
 					</thead>
@@ -93,8 +86,8 @@ export default function UserModels({
 									<div className="text-sm text-gray-900">{row.name}</div>
 									<div className="text-xs text-gray-500 font-mono">{row.id}</div>
 								</td>
-								<td className="px-4 py-3 text-right text-sm font-mono">{money(row.inputPerMillion)}</td>
-								<td className="px-4 py-3 text-right text-sm font-mono">{money(row.outputPerMillion)}</td>
+								<td className="px-4 py-3 text-right text-sm font-mono">{row.inputPrice}</td>
+								<td className="px-4 py-3 text-right text-sm font-mono">{row.outputPrice}</td>
 								<td className="px-4 py-3">
 									<select
 										value={row.mode}

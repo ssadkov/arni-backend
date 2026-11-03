@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import prisma from '@/lib/prisma';
+import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 import type { CatalogRow } from '@/lib/llm/bedrockAccess';
 import { ImportCatalog, ModelToggle } from './ModelControls';
 
@@ -16,18 +17,12 @@ async function catalogMissingFromDatabase(known: Set<string>): Promise<CatalogRo
 
 export const dynamic = 'force-dynamic';
 
-function money(value: number | null) {
-	if (value == null) {
-		return '—';
-	}
-	return `$${value >= 1 ? value.toFixed(2) : value.toFixed(4)}`;
-}
-
 function accessLabel(model: { agreementStatus: string | null; authorizationStatus: string | null; regionAvailability: string | null }) {
 	return [model.agreementStatus, model.authorizationStatus, model.regionAvailability].filter(Boolean).join(' / ') || '—';
 }
 
 export default async function ModelsPage() {
+	const ratesPromise = billingRates();
 	let models: Awaited<ReturnType<typeof prisma.bedrockModel.findMany>> = [];
 	let dbError = false;
 	try {
@@ -48,6 +43,8 @@ export default async function ModelsPage() {
 		dbError = true;
 	}
 	const missing = dbError ? [] : await catalogMissingFromDatabase(new Set(models.map(model => model.id)));
+	const rates = await ratesPromise;
+	const money = (usd: number | null) => formatBillingRub(usd === null ? null : usd * 1_000_000, rates.RUB);
 
 	return (
 		<div className="space-y-6">
@@ -86,8 +83,8 @@ export default async function ModelsPage() {
 						<tr>
 							<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Модель</th>
 							<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Доступ AWS</th>
-							<th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">$/1M input</th>
-							<th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">$/1M output</th>
+							<th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Вход / 1 млн</th>
+							<th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Выход / 1 млн</th>
 							<th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Для всех</th>
 						</tr>
 					</thead>

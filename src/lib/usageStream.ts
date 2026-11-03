@@ -10,11 +10,17 @@ export function usageStream(body: ReadableStream<Uint8Array>, settle: (usage: Re
 		async start(controller) {
 			const reader = body.getReader();
 			let failed = false;
+			let settlement: Promise<void> | undefined;
 			try {
 				while (true) {
 					const { value, done } = await reader.read();
 					if (done) { break; }
 					parser.push(value);
+					if (parser.done && !settlement) {
+						// OpenAI clients can finish as soon as they see [DONE] and read the chat total immediately.
+						settlement = settle(parser.usage);
+						await settlement;
+					}
 					if (!cancelled) { controller.enqueue(value); }
 				}
 				parser.push(new Uint8Array(), true);
@@ -22,7 +28,7 @@ export function usageStream(body: ReadableStream<Uint8Array>, settle: (usage: Re
 				failed = true;
 			} finally {
 				try {
-					await settle(parser.usage);
+					await (settlement ?? settle(parser.usage));
 					if (!cancelled) {
 						if (failed) { controller.error(new Error('Поток модели прерван. Расход учтён.')); }
 						else { controller.close(); }

@@ -3,6 +3,7 @@ import { decryptJWT } from '@/lib/jwt';
 import prisma from '@/lib/prisma';
 import { accountPayload } from '@/lib/freeSteps';
 import { budgetSnapshot } from '@/lib/budget';
+import { billingRates } from '@/lib/billingCurrency';
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
 
 export const dynamic = 'force-dynamic';
@@ -34,8 +35,10 @@ export async function GET(req: NextRequest) {
 		return NextResponse.json({ error: 'Account is blocked' }, { status: 403, headers });
 	}
 
-	const budget = await prisma.accountBudget.findUnique({ where: { userId } });
-	return NextResponse.json({ user: { ...accountPayload(user), budget: budget ? budgetSnapshot(budget) : null } }, {
+	const [budget, rates] = await Promise.all([
+		prisma.accountBudget.findUnique({ where: { userId } }), billingRates(),
+	]);
+	return NextResponse.json({ user: { ...accountPayload(user), budget: budget ? budgetSnapshot(budget) : null, billingRates: rates } }, {
 		headers: { 'Cache-Control': 'no-store', ...headers },
 	});
 }

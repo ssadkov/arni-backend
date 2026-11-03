@@ -51,6 +51,7 @@ export class UsageParser {
 	private readonly decoder = new TextDecoder();
 	private pending = '';
 	usage: ReportedUsage | null = null;
+	done = false;
 
 	push(chunk: Uint8Array, final = false): void {
 		this.pending += this.decoder.decode(chunk, { stream: !final });
@@ -58,11 +59,13 @@ export class UsageParser {
 		this.pending = final ? '' : lines.pop() || '';
 		for (const line of lines) {
 			if (!line.startsWith('data:')) { continue; }
+			const dataText = line.slice(5).trim();
+			if (dataText === '[DONE]') { this.done = true; break; }
 			try {
-				const data = JSON.parse(line.slice(5).trim());
+				const data = JSON.parse(dataText);
 				const usage = validUsage(data.usage);
 				if (usage) { this.usage = usage; }
-			} catch { /* Comments, [DONE], or non-JSON events. */ }
+			} catch { /* Non-JSON events. */ }
 		}
 		// Refuse unbounded/malformed events instead of accumulating an entire response.
 		if (this.pending.length > 1_000_000) { throw new Error('SSE event too large'); }
