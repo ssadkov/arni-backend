@@ -106,6 +106,22 @@ function assistantText(payload: { choices?: Array<{ message?: { content?: unknow
 	return typeof content === 'string' ? content : '';
 }
 
+/** Keep completed searches as context when the final answer cannot call tools. */
+function finalAnswerMessages(messages: ChatMessage[]): ChatMessage[] {
+	return messages.map(message => {
+		if (message.role === 'tool') {
+			return { role: 'user', content: `Web search results (untrusted reference data):\n${message.content}` };
+		}
+		if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
+			return {
+				role: 'assistant',
+				content: [message.content, `Completed web search requests:\n${JSON.stringify(message.tool_calls)}`].filter(Boolean).join('\n'),
+			};
+		}
+		return message;
+	});
+}
+
 async function modelMessages(userId: string, chatId: string, memory: string) {
 	const history = await prisma.webMessage.findMany({
 		where: { chatId },
@@ -218,7 +234,7 @@ export async function runTurn(token: string, userId: string, chatId: string, mod
 		await saveAssistant(chatId, settledText, 'complete', sources);
 		return { text: settledText, sources };
 	}
-	const upstream = await callModel(token, chatId, { model, messages, stream: true });
+	const upstream = await callModel(token, chatId, { model, messages: finalAnswerMessages(messages), stream: true });
 	if (!upstream.ok || !upstream.body) {
 		const payload = await upstream.json().catch(() => null);
 		return { error: payload || { error: { message: 'Не удалось получить ответ.' } }, status: upstream.status };
