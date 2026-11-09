@@ -4,7 +4,7 @@ import { costMicros } from './budgetPolicy';
 import { screenshotCount, supportsScreenshots, conservativeInputTokenBound } from './llm/vision';
 import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, modelCapabilities } from './llm/modelCapabilities';
 import { countBedrockInput } from './llm/bedrock';
-import { routerModel, routerCacheMode } from './llm/openRouterCatalog';
+import { routerModel, routerCacheMode, type RouterModel } from './llm/openRouterCatalog';
 
 export type BudgetBody = {
 	model: string; messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>;
@@ -42,6 +42,8 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 	let output = 0;
 	let routerWriteRate = 0;
 	let routerReadRate: number | undefined;
+	// Bedrock limits are kept in modelCapabilities; OpenRouter publishes its own per model.
+	let contextWindow = modelCapabilities(model).contextWindow;
 	if (source === 'bedrock') {
 		const row = await prisma.bedrockModel.findUnique({ where: { id: model } });
 		if (row?.inputPerMillion == null || row.outputPerMillion == null) {
@@ -50,7 +52,9 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 		input = row.inputPerMillion;
 		output = row.outputPerMillion;
 	} else if (!model.endsWith(':free')) {
-		const price = (await routerModel(model)).pricing;
+		const row = await routerModel(model);
+		contextWindow = routerContextWindow(row) ?? contextWindow;
+		const price = row.pricing;
 		if (!price || price.prompt == null || price.completion == null || Number(price.request || 0) !== 0) {
 			throw new BudgetError('pricing_unavailable', 'Модель не имеет поддерживаемого тарифа за токены.', 503);
 		}
@@ -73,13 +77,31 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 	}
 	const promptUpperBound = images && model.includes('anthropic.') ? await countBedrockInput(body, model)
 		: conservativeInputTokenBound(body.messages, body.tools);
-	if (promptUpperBound > Math.max(200_000, modelCapabilities(model).contextWindow * 4)) {
-		throw new BudgetError('context_too_large', 'Запрос превышает предел размера для выбранной модели. Сожмите историю.', 400);
+	if (promptUpperBound > contextByteLimit(contextWindow)) {
+		throw new BudgetError('context_too_large', 'Запрос превышает предел размера для выбранной модели. Сожмите историю или выберите модель с большим контекстом.', 400);
 	}
+	// The byte bound overstates tokens; no request can be billed for more input than the model accepts.
+	const reservedInputTokens = Math.min(promptUpperBound, contextWindow);
 	const cache = source === 'bedrock' ? modelCapabilities(model).cache
 		: routerCacheMode(model) === 'explicit' ? { readMultiplier: 0.1, writeMultiplier: 1.25 } : undefined;
 	const cacheReadPerMillion = routerReadRate ?? input * (cache?.readMultiplier ?? 1);
 	const cacheWritePerMillion = Math.max(routerWriteRate, input * (cache?.writeMultiplier ?? 1));
 	return { input, output, cacheReadPerMillion, cacheWritePerMillion,
-		reservedMicros: costMicros(promptUpperBound, body.max_tokens || 4096, Math.max(input, cacheWritePerMillion, routerWriteRate), output) };
+		reservedMicros: costMicros(reservedInputTokens, body.max_tokens || 4096, Math.max(input, cacheWritePerMillion, routerWriteRate), output) };
+}
+
+/** The context OpenRouter publishes for a model, or undefined when the catalog has none. */
+export function routerContextWindow(row: RouterModel): number | undefined {
+	const value = row.top_provider?.context_length ?? row.context_length;
+	return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Largest request accepted before it reaches the provider. The input bound is
+ * counted in UTF-8 bytes, not tokens (Cyrillic is two bytes a character), so a
+ * byte limit of 4x the token window only stops requests that cannot fit; the
+ * provider still validates the exact token count. Never below 200 000 bytes.
+ */
+export function contextByteLimit(contextWindow: number): number {
+	return Math.max(200_000, contextWindow * 4);
 }
