@@ -8,6 +8,9 @@ import prisma from '@/lib/prisma';
 const COOKIE = 'arni_web_oauth';
 const CODE_TTL_MS = 2 * 60 * 1000;
 
+/** Marks the PKCE verifier as Google's so other providers' callbacks reject it. */
+export const GOOGLE_VERIFIER_PREFIX = 'google.';
+
 export function apiPublicOrigin(req: NextRequest) {
 	const configured = process.env.API_PUBLIC_ORIGIN?.replace(/\/$/, '');
 	if (configured) {
@@ -107,8 +110,8 @@ export async function consumeLoginCode(code: string) {
 	return user;
 }
 
-/** Exchange a provider access token through the existing Yandex/VK account path. */
-export async function sessionFromProviderToken(provider: 'yandex' | 'vk', token: string) {
+/** Exchange a provider access token through the existing Yandex/VK/Google account path. */
+export async function sessionFromProviderToken(provider: 'yandex' | 'vk' | 'google', token: string) {
 	const response = await exchangeIdentity(new NextRequest('https://arni.internal/api/auth/exchange', {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },

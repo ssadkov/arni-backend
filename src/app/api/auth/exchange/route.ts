@@ -129,6 +129,55 @@ export async function POST(req: NextRequest) {
       const sessionJwt = await encryptJWT({ userId: user.id, email: user.email, plan: user.plan });
       return NextResponse.json({ token: sessionJwt, user: accountPayload(user) });
     }
+    if (provider === 'google') {
+      // tokeninfo reports which OAuth client the token was issued to. Only tokens
+      // issued to our own web or desktop clients are accepted, so a token from
+      // another Google app cannot be replayed here.
+      const allowedClients = [process.env.GOOGLE_OAUTH_CLIENT_ID, process.env.GOOGLE_DESKTOP_CLIENT_ID]
+        .map(value => value?.trim())
+        .filter((value): value is string => !!value);
+      if (allowedClients.length === 0) {
+        return NextResponse.json({ error: 'Google sign-in is not configured' }, { status: 503 });
+      }
+      const googleRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`);
+      if (!googleRes.ok) {
+        return NextResponse.json({ error: 'Invalid Google token' }, { status: 401 });
+      }
+      const googleInfo = await googleRes.json() as { aud?: string; azp?: string; sub?: string; email?: string; email_verified?: string | boolean };
+      const audience = googleInfo.aud || googleInfo.azp || '';
+      if (!allowedClients.includes(audience)) {
+        return NextResponse.json({ error: 'Invalid Google token' }, { status: 401 });
+      }
+      const providerId = String(googleInfo.sub ?? '');
+      const email = typeof googleInfo.email === 'string' ? googleInfo.email.trim().toLowerCase() : '';
+      const emailVerified = googleInfo.email_verified === true || googleInfo.email_verified === 'true';
+      if (!providerId || !email || !emailVerified) {
+        return NextResponse.json({ error: 'Incomplete user data from Google' }, { status: 400 });
+      }
+
+      const existingIdentity = await prisma.identity.findUnique({
+        where: { provider_providerId: { provider: 'google', providerId } },
+        include: { user: true },
+      });
+      let user = existingIdentity?.user;
+      if (!user) {
+        const matchingUser = await prisma.user.upsert({
+          where: { email },
+          update: {},
+          create: { email },
+        });
+        const identity = await prisma.identity.upsert({
+          where: { provider_providerId: { provider: 'google', providerId } },
+          update: {},
+          create: { userId: matchingUser.id, provider: 'google', providerId },
+          include: { user: true },
+        });
+        user = identity.user;
+      }
+
+      const sessionJwt = await encryptJWT({ userId: user.id, email: user.email, plan: user.plan });
+      return NextResponse.json({ token: sessionJwt, user: accountPayload(user) });
+    }
     return NextResponse.json({ error: 'Unsupported provider' }, { status: 400 });
   } catch (error) {
     console.error('Auth Exchange Error:', error);
