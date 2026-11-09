@@ -35,6 +35,8 @@ const openWeight: Record<string, ModelCapabilities> = {
 	'minimax.minimax-m2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
 	// Reads a contract page exactly from a screenshot (verified 2026-10-30), but only outside toolResult.
 	'moonshotai.kimi-k2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: true, region: 'us-east-1', toolResultImages: false },
+	// Streamed a tool call over 65K input tokens and passed the ffmpeg agent benchmark 2/3 with a frame check (2026-11-09).
+	'zai.glm-5': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
 };
 
 export const QWEN3_MODEL_IDS = Object.keys(qwen);

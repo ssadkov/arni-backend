@@ -1,5 +1,5 @@
 import prisma from '@/lib/prisma';
-import { utcDayKey } from '@/lib/freeSteps';
+import { FREE_DAILY_STEP_LIMIT, utcDayKey } from '@/lib/freeSteps';
 import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 
 export const dynamic = 'force-dynamic';
@@ -77,7 +77,7 @@ export default async function AdminDashboard() {
           <p className="mt-2 text-3xl font-bold text-gray-900">
             {freeStepsToday.toLocaleString('ru-RU')}
           </p>
-          <p className="text-xs text-gray-400 mt-1">Сброс в 00:00 UTC · лимит 150 на пользователя</p>
+          <p className="text-xs text-gray-400 mt-1">Сброс в 00:00 UTC · лимит {FREE_DAILY_STEP_LIMIT} на пользователя</p>
         </div>
 
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">

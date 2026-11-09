@@ -15,6 +15,7 @@ const models = [
 	['deepseek.v3.2', 'DeepSeek v3.2', 'us-east-1'],
 	['minimax.minimax-m2.5', 'MiniMax M2.5', 'us-east-1'],
 	['moonshotai.kimi-k2.5', 'Kimi K2.5', 'us-east-1'],
+	['zai.glm-5', 'GLM 5', 'us-east-1'],
 ];
 
 function aws(region, ...args) {
