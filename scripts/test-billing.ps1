@@ -18,6 +18,8 @@ try {
 	if ($LASTEXITCODE -ne 0) { throw 'Bedrock conversion checks failed' }
 	node scripts/test-router-cache.cjs
 	if ($LASTEXITCODE -ne 0) { throw 'Router cache checks failed' }
+	node scripts/test-context-limit.cjs
+	if ($LASTEXITCODE -ne 0) { throw 'Context limit checks failed' }
 	& "$taskPgBin\initdb.exe" -D $taskCluster -U arni_budget_test --auth=trust --no-locale --encoding=UTF8 --no-sync
 	if ($LASTEXITCODE -ne 0) { throw 'initdb failed' }
 	# WaitForExit waits for pg_ctl, while Start-Process -Wait also waits for the server descendants.
