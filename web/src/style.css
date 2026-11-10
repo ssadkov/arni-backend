@@ -67,6 +67,19 @@ button.primary:hover:not(:disabled), .actions a.primary:hover { opacity: 0.8; }
 }
 
 .gate-card { width: min(26rem, 100%); display: grid; gap: 1rem; }
+.desktop-card label { display: grid; gap: 0.35rem; }
+.desktop-card input {
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--paper);
+}
+.code-display {
+  font: 700 2rem/1.2 ui-monospace, Consolas, monospace;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
 .gate-card h1 { font-size: 2rem; letter-spacing: -0.04em; }
 .gate-card > p:not(.error) { color: var(--muted); }
 .workspace { height: 100dvh; display: grid; grid-template-columns: 16rem minmax(0, 1fr); }

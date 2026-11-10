@@ -39,6 +39,7 @@ model User {
   webMemory     WebMemory?
   webImages     WebImage[]
   webLoginCodes WebLoginCode[]
+  desktopAuthRequests DesktopAuthRequest[]
 }
 
 model Identity {
@@ -286,6 +287,28 @@ model WebLoginCode {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
+}
+
+// Desktop sign-in challenge. deviceCodeHash is the client secret.
+// userCode is shown for visual comparison and is not enough to mint a JWT.
+// The issued JWT is not stored; a later poll before expiry signs a new one.
+model DesktopAuthRequest {
+  id              String   @id
+  deviceCodeHash  String   @unique
+  userCodeHash    String
+  userCode        String
+  status          String   @default("pending")
+  userId          String?
+  clientIpHash    String?
+  pollIntervalSec Int      @default(5)
+  lastPolledAt    DateTime?
+  failedAttempts  Int      @default(0)
+  expiresAt       DateTime
+  createdAt       DateTime @default(now())
+  user            User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([clientIpHash, createdAt])
 }
 
 enum Plan {
