@@ -41,6 +41,11 @@ function foundationModelId(id: string): string {
 	return id.replace(/^(?:us|eu|apac|global)\./, '');
 }
 
+/** Whether the picker should lead with this model: it is on one of the curated lists. */
+export function isRecommendedModel(id: string): boolean {
+	return PICKER_FREE_MODELS.includes(id) || PICKER_BEDROCK_MODELS.includes(foundationModelId(id));
+}
+
 /** Curated free models in their order, topped up from the rest when too few are live. */
 export function pickFreeModels<T extends { id: string }>(freeModels: readonly T[]): T[] {
 	const curated = PICKER_FREE_MODELS.map(id => freeModels.find(model => model.id === id)).filter((model): model is T => !!model);

@@ -7,7 +7,7 @@ import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, managedModelMetadata
 import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/lib/llm/openRouterCatalog';
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
 import { billingRates } from '@/lib/billingCurrency';
-import { pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
+import { isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
 
 function outputLimit(model: RouterModel): number {
 	const limit = zeroPrice(model) ? FREE_MAX_OUTPUT_TOKENS : MANAGED_MAX_OUTPUT_TOKENS;
@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
 				const priced = allowed.filter(model => model.inputPerMillion != null && model.outputPerMillion != null);
 				// Paid models are Bedrock only (AWS credits); a short curated list keeps the picker readable.
 				bedrock = pickBedrockModels(priced, selected).map(model => ({
-					id: model.id, name: model.name, arni_default: user.llmProvider === 'BEDROCK' && model.id === selected,
+					id: model.id, name: model.name, arni_default: user.llmProvider === 'BEDROCK' && model.id === selected, arni_recommended: isRecommendedModel(model.id),
 					arni_provider: 'bedrock', supported_parameters: ['tools'], ...managedModelMetadata(model.id),
 					pricing: { prompt: String(model.inputPerMillion! / 1_000_000), completion: String(model.outputPerMillion! / 1_000_000) },
 				}));
@@ -51,7 +51,7 @@ export async function GET(req: NextRequest) {
 		const models = pickFreeModels(router.filter(model => zeroPrice(model))).map(model => ({
 			...model, arni_provider: 'openrouter', arni_free: zeroPrice(model), arni_cache: routerCacheMode(model.id),
 			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
-			arni_traffic: lights.get(model.id),
+			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
 		}));
 		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...bedrock, ...models] }, {
 			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },

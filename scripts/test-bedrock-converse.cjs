@@ -90,6 +90,8 @@ async function main() {
 		assert.equal(pickBedrockModels(allowed, 'us.anthropic.claude-sonnet-4-6')[0].id, 'us.anthropic.claude-sonnet-4-6', 'selected profile wins');
 		assert.deepEqual(pickBedrockModels(allowed, 'qwen.qwen3-32b-v1:0').map(model => model.id).slice(-1), ['qwen.qwen3-32b-v1:0'], 'selected model stays listed');
 		assert.deepEqual(pickBedrockModels(free(['us.meta.llama3-8b']), null), [], 'uncurated models are hidden');
+		const { isRecommendedModel } = require('../src/lib/modelPicker.ts');
+		assert.deepEqual(['global.anthropic.claude-sonnet-4-6', 'zai.glm-5', PICKER_FREE_MODELS[0], 'qwen.qwen3-32b-v1:0', 'x:free'].map(isRecommendedModel), [true, true, true, false, false]);
 	});
 	await check('model metadata carries real context, response reserve, vision and regional Qwen routing', () => {
 		assert.equal(QWEN3_MODEL_IDS.length, 7);
