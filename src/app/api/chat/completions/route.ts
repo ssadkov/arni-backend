@@ -126,25 +126,14 @@ export async function POST(req: NextRequest) {
     }
     trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
 
-    // Платные модели OpenRouter — только в тарифе Pro. Пока его нет, клиент предлагает
-    // записаться в лист ожидания (POST /api/waitlist).
-    if (!budget && provider === 'openrouter' && !isFreeModel && user.plan !== 'PRO') {
-      const message = 'Эта модель будет доступна в тарифе Pro. Выберите бесплатную модель или нажмите «Сообщить о запуске», чтобы узнать, когда Pro откроется.';
-      await track(402, message);
+    // Paid OpenRouter models are disabled: Arni pays for them in cash. Paid usage goes
+    // through Bedrock (AWS credits); OpenRouter serves only :free variants.
+    if (provider === 'openrouter' && !isFreeModel) {
+      const message = 'Платные модели OpenRouter отключены. Выберите модель AWS Bedrock или бесплатную модель.';
+      await track(403, message);
       return NextResponse.json({
-        error: {
-          code: 'pro_required',
-          message,
-        },
-      }, { status: 402 });
-    }
-
-    if (!budget && provider === 'openrouter' && !isFreeModel && user.tokenBalance <= 0) {
-      const message = 'На балансе закончились токены для платных моделей.';
-      await track(402, message);
-      return NextResponse.json({
-        error: { code: 'insufficient_tokens', message },
-      }, { status: 402 });
+        error: { code: 'paid_openrouter_disabled', message },
+      }, { status: 403 });
     }
 
     if (!budget && provider === 'bedrock' && user.tokenBalance <= 0) {
