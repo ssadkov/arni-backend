@@ -29,3 +29,15 @@ export function windowsUpdate(release: WindowsRelease, manifest: WindowsUpdateMa
 	return { url: asset.browser_download_url, version: manifest.commit, productVersion: manifest.version,
 		sha256hash: manifest.sha256, size: manifest.size, timestamp, releaseNotes: release.body || '' };
 }
+
+/**
+ * A zip install cannot apply an update, so VS Code only offers a "Download Update" button that opens the url.
+ * The installer manifest still decides whether this release is newer; the zip of the same tag is what opens.
+ */
+export function windowsArchiveUpdate(release: WindowsRelease, manifest: WindowsUpdateManifest, commit: string, currentVersion: string) {
+	const installer = windowsUpdate(release, manifest, commit, currentVersion);
+	const archive = installer && windowsReleaseAsset(release, 'ArniCode-win32-x64.zip');
+	if (!installer || !archive) { return null; }
+	return { url: archive.browser_download_url, version: installer.version, productVersion: installer.productVersion,
+		timestamp: installer.timestamp, releaseNotes: installer.releaseNotes };
+}
