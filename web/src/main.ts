@@ -133,15 +133,19 @@ async function boot() {
   void refreshModels();
 }
 
+const YANDEX_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#FC3F1D"/><path fill="#fff" d="M13.32 7.67h-.93c-1.7 0-2.6.86-2.6 2.13 0 1.44.62 2.11 1.89 2.97l1.05.7-3.02 4.52H7.45l2.72-4.04c-1.56-1.12-2.44-2.2-2.44-4.04 0-2.3 1.6-3.87 4.65-3.87h3.03v11.95h-2.09V7.67z"/></svg>';
+const VK_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#0077FF"/><path fill="#fff" d="M12.77 17.29c-5.2 0-8.17-3.56-8.29-9.49h2.6c.09 4.35 2.01 6.19 3.53 6.57V7.8h2.45v3.75c1.5-.16 3.08-1.87 3.61-3.75h2.45c-.41 2.32-2.11 4.03-3.32 4.73 1.21.57 3.15 2.05 3.89 4.76h-2.7c-.58-1.81-2.03-3.21-3.93-3.4v3.4h-.29z"/></svg>';
+const GOOGLE_ICON = '<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>';
+
 function renderGate(message: string) {
   app!.innerHTML = `<main class="gate"><section class="gate-card">
     <h1>Arni</h1>
     <p>Чат с памятью, картинками и поиском. Вход тот же, что в редакторе.</p>
     ${message ? `<p class="error">${escapeHtml(message)}</p>` : ''}
     <div class="actions">
-      <a class="primary" href="${API}/api/web/auth/yandex/start">Войти через Яндекс</a>
-      <a href="${API}/api/web/auth/vk/start">Войти через VK</a>
-      <a href="${API}/api/web/auth/google/start">Войти через Google</a>
+      <a class="primary" href="${API}/api/web/auth/yandex/start">${YANDEX_ICON}Войти через Яндекс</a>
+      <a href="${API}/api/web/auth/vk/start">${VK_ICON}Войти через VK</a>
+      <a href="${API}/api/web/auth/google/start">${GOOGLE_ICON}Войти через Google</a>
     </div>
   </section></main>`;
 }
