@@ -110,15 +110,15 @@ async function main() {
 		assert.equal((await post(request('test/paid'))).status, 403);
 		assert.equal(routerCalls, before);
 		await prisma.accountBudget.update({ where: { userId }, data: { enabled: true, balanceMicros: 2_000_000, validUntil: new Date(Date.now() + 86400_000) } });
-		const paid = await post(request('test/paid')); assert.equal(paid.status, 200); await paid.json();
-		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 1_999_950);
+		const paid = await post(request('test/paid')); assert.equal(paid.status, 403); assert.equal((await paid.json()).error.code, 'paid_openrouter_disabled'); assert.equal(routerCalls, before, 'paid OpenRouter never reaches OpenRouter');
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 2_000_000);
 		routerMode = 'limited';
 		const beforeSteps = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).freeStepsTotal;
 		const fallback = await post(request('test/vision:free')); assert.equal(fallback.status, 200); await fallback.json();
 		assert.equal(routerBody.model, 'test:free');
 		assert.equal(routerBody.messages[0].content[1].image_url.url, imagePart.image_url.url);
 		assert.equal((await prisma.user.findUniqueOrThrow({ where: { id: userId } })).freeStepsTotal, beforeSteps + 1);
-		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 1_999_950);
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 2_000_000);
 		routerMode = 'success';
 		const publicList = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models'));
 		assert.ok((await publicList.json()).data.every(row => row.id.endsWith(':free')));
