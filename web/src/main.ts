@@ -1,4 +1,5 @@
 import './style.css';
+import { captureDesktopRequest, pendingDesktopRequest, startDesktopApproval } from './desktopAuth';
 import { renderMarkdown } from './markdown';
 
 const API = (import.meta.env.VITE_API_ORIGIN || 'https://api.arnion.ru').replace(/\/$/, '');
@@ -103,6 +104,10 @@ async function boot() {
   const params = new URLSearchParams(location.search);
   const code = params.get('code');
   const error = params.get('error');
+  captureDesktopRequest(params);
+  if (code || error || params.has('desktop_request')) {
+    history.replaceState({}, '', '/');
+  }
   if (code) {
     const response = await fetch(`${API}/api/web/auth/session`, {
       method: 'POST',
@@ -114,16 +119,30 @@ async function boot() {
       token = body.token;
       localStorage.setItem(TOKEN_KEY, token);
     }
-    history.replaceState({}, '', '/');
   } else if (error) {
-    history.replaceState({}, '', '/');
-    renderGate('Не удалось войти. Попробуйте ещё раз.');
+    renderGate(pendingDesktopRequest()
+      ? 'Не удалось войти. Попробуйте ещё раз. После входа подтвердите код из окна Arni Lite.'
+      : 'Не удалось войти. Попробуйте ещё раз.');
     return;
   }
   if (!token) {
-    renderGate('');
+    renderGate(pendingDesktopRequest() ? 'После входа подтвердите код из окна Arni Lite. Подтверждайте только тот код, который видите в программе.' : '');
     return;
   }
+  const desktopRequest = pendingDesktopRequest();
+  if (desktopRequest && app) {
+    startDesktopApproval(app, {
+      api: API,
+      token,
+      requestId: desktopRequest,
+      onFinished: () => { void enterApp(); },
+    });
+    return;
+  }
+  await enterApp();
+}
+
+async function enterApp() {
   await refreshAccount();
   if (!token) {
     return;
