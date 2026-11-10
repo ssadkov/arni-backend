@@ -26,12 +26,19 @@ WEB_APP_ORIGIN=https://chat.arnion.kz
 API_PUBLIC_ORIGIN=https://api.arnion.ru
 YANDEX_OAUTH_CLIENT_ID=
 YANDEX_OAUTH_CLIENT_SECRET=
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=
+GOOGLE_DESKTOP_CLIENT_ID=
 ```
+
+`GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET` come from a Google Cloud OAuth client of type "Web application". `GOOGLE_DESKTOP_CLIENT_ID` is the separate "Desktop app" client the editor uses; leave it empty until the editor ships Google sign-in. The exchange accepts a Google token only when it was issued to one of these two clients.
 
 Register both callback URLs on the Yandex and VK apps:
 
 - `https://api.arnion.ru/api/web/auth/yandex/callback`
 - `https://api.arnion.ru/api/web/auth/vk/callback`
+
+Register `https://api.arnion.ru/api/web/auth/google/callback` as an authorized redirect URI on the Google web client.
 
 Apply `deploy/web-chat/20261101-web-chat.sql` once to the existing Postgres before the API deployment starts writing chats.
 

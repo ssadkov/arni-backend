@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { apiPublicOrigin, issueLoginCode, readOauthCookie, redirectToApp, sessionFromProviderToken } from '@/lib/webSession';
+import { apiPublicOrigin, GOOGLE_VERIFIER_PREFIX, issueLoginCode, readOauthCookie, redirectToApp, sessionFromProviderToken } from '@/lib/webSession';
 
 export async function GET(req: NextRequest) {
 	const secure = req.nextUrl.protocol === 'https:';
@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
 	const code = url.searchParams.get('code');
 	const state = url.searchParams.get('state');
 	const deviceId = url.searchParams.get('device_id') || '';
-	if (!cookie || !code || !state || cookie.state !== state || cookie.verifier === 'yandex') {
+	if (!cookie || !code || !state || cookie.state !== state || cookie.verifier === 'yandex' || cookie.verifier.startsWith(GOOGLE_VERIFIER_PREFIX)) {
 		return redirectToApp('/?error=oauth', secure);
 	}
 	try {

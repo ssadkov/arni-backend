@@ -141,6 +141,7 @@ function renderGate(message: string) {
     <div class="actions">
       <a class="primary" href="${API}/api/web/auth/yandex/start">Войти через Яндекс</a>
       <a href="${API}/api/web/auth/vk/start">Войти через VK</a>
+      <a href="${API}/api/web/auth/google/start">Войти через Google</a>
     </div>
   </section></main>`;
 }
