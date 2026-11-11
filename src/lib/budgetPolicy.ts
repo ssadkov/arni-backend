@@ -6,6 +6,13 @@ export const MAX_REQUEST_DURATION_MS = 300 * 1000;
 /** A reservation older than this was abandoned by a killed function and must not block the user. */
 export const STALE_RESERVATION_MS = 2 * MAX_REQUEST_DURATION_MS;
 
+/**
+ * Paid requests one user may have in flight. One agent turn legitimately overlaps requests:
+ * a subagent, chat title generation, a second open chat. Each reservation is already
+ * deducted from the balance under a row lock, so this bounds bursts, not overspending.
+ */
+export const MAX_CONCURRENT_RESERVATIONS = 3;
+
 /** Pending reservations created before the returned moment are stale. */
 export function staleReservationCutoff(now: Date): Date {
 	return new Date(now.getTime() - STALE_RESERVATION_MS);
