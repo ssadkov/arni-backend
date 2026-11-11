@@ -1,6 +1,15 @@
 export const USD_MICROS = 1_000_000;
 export const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+/** Longest route maxDuration (chat and image generation) that holds a budget reservation open. */
+export const MAX_REQUEST_DURATION_MS = 300 * 1000;
+/** A reservation older than this was abandoned by a killed function and must not block the user. */
+export const STALE_RESERVATION_MS = 2 * MAX_REQUEST_DURATION_MS;
+
+/** Pending reservations created before the returned moment are stale. */
+export function staleReservationCutoff(now: Date): Date {
+	return new Date(now.getTime() - STALE_RESERVATION_MS);
+}
 
 export type BudgetWindow = { usedMicros: number; requests: number; startedAt: Date | null };
 
