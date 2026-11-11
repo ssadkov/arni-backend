@@ -13,7 +13,7 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
 }).outputText, filename);
 
 const runtime = require('@aws-sdk/client-bedrock-runtime');
-const { toConverse, completeWithBedrock, cacheConversePrefix, cacheConverseSystem, bedrockUsage } = require('../src/lib/llm/bedrock.ts');
+const { toConverse, completeWithBedrock, cacheConversePrefix, cacheConverseSystem, bedrockUsage, lengthNotice } = require('../src/lib/llm/bedrock.ts');
 const { modelCapabilities, managedModelMetadata, QWEN3_MODEL_IDS, OPEN_WEIGHT_MODEL_IDS } = require('../src/lib/llm/modelCapabilities.ts');
 const { supportsScreenshots, conservativeInputTokenBound } = require('../src/lib/llm/vision.ts');
 const model = 'us.anthropic.claude-sonnet-4-6';
@@ -226,7 +226,7 @@ async function main() {
 			assert.equal((await response.json()).error.code, 'invalid_messages');
 			assert.equal(sent, before);
 		});
-		await check('a tool call that spends the whole output budget is reported as length, not tool_calls', async () => {
+		await check('a tool call that spends the whole output budget is reported as length with a visible notice', async () => {
 			const input = '{"path":"a.py","content":"x';
 			runtime.BedrockRuntimeClient.prototype.send = async command => {
 				sent++;
@@ -242,12 +242,19 @@ async function main() {
 				}
 				return { output: { message: { role: 'assistant', content: [{ toolUse: { toolUseId: 'cut', name: 'create_file', input: {} } }] } }, stopReason: 'tool_use', usage };
 			};
-			const reasons = [];
+			const results = [];
 			for (const stream of [false, true]) {
 				const text = await (await completeWithBedrock({ messages: [{ role: 'user', content: 'Write it.' }], stream, max_tokens: 64 }, model)).text();
-				reasons.push(stream ? [...text.matchAll(/"finish_reason":"(\w+)"/g)].at(-1)?.[1] : JSON.parse(text).choices[0].finish_reason);
+				if (!stream) {
+					const { message, finish_reason } = JSON.parse(text).choices[0];
+					results.push({ finish: finish_reason, content: message.content });
+					continue;
+				}
+				const choices = text.split('\n').filter(line => line.startsWith('data: {')).map(line => JSON.parse(line.slice(6)).choices?.[0]).filter(Boolean);
+				results.push({ finish: choices.map(choice => choice.finish_reason).filter(Boolean).at(-1), content: choices.map(choice => choice.delta?.content ?? '').join('') });
 			}
-			assert.deepEqual(reasons, ['length', 'length']);
+			const notice = lengthNotice(true);
+			assert.deepEqual(results, [{ finish: 'length', content: notice }, { finish: 'length', content: notice }]);
 		});
 		await check('Bedrock validation errors retain HTTP 400 and are not retried inside the backend', async () => {
 			runtime.BedrockRuntimeClient.prototype.send = async () => { sent++; throw Object.assign(new Error('Invalid request'), { $metadata: { httpStatusCode: 400 } }); };
