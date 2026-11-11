@@ -18,7 +18,8 @@ export type ModelCapabilities = {
 
 const qwen: Record<string, ModelCapabilities> = {
 	'qwen.qwen3-coder-next': { contextWindow: 262144, maxOutputTokens: 16384, vision: false, region: 'us-east-1' },
-	'qwen.qwen3-next-80b-a3b': { contextWindow: 262144, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
+	// Bedrock accepted 16000 and finished a 13.7K-token tool call (probe 2026-11-11).
+	'qwen.qwen3-next-80b-a3b': { contextWindow: 262144, maxOutputTokens: 16000, vision: false, region: 'us-east-1' },
 	'qwen.qwen3-32b-v1:0': { contextWindow: 32768, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
 	'qwen.qwen3-vl-235b-a22b': { contextWindow: 262144, maxOutputTokens: 8192, vision: true, region: 'us-east-1', toolResultImages: false },
 	'qwen.qwen3-coder-30b-a3b-v1:0': { contextWindow: 262144, maxOutputTokens: 16384, vision: false, region: 'us-east-1' },
@@ -34,15 +35,20 @@ const openWeight: Record<string, ModelCapabilities> = {
 	'deepseek.v3.2': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
 	'minimax.minimax-m2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
 	// Reads a contract page exactly from a screenshot (verified 2026-10-30), but only outside toolResult.
-	'moonshotai.kimi-k2.5': { contextWindow: 131072, maxOutputTokens: 8192, vision: true, region: 'us-east-1', toolResultImages: false },
+	// Bedrock accepted 16000 (probe 2026-11-11); at the limit it reports tool_use with cut JSON, see finishReason.
+	'moonshotai.kimi-k2.5': { contextWindow: 131072, maxOutputTokens: 16000, vision: true, region: 'us-east-1', toolResultImages: false },
 	// Streamed a tool call over 65K input tokens and passed the ffmpeg agent benchmark 2/3 with a frame check (2026-11-09).
-	'zai.glm-5': { contextWindow: 131072, maxOutputTokens: 8192, vision: false, region: 'us-east-1' },
+	// Bedrock accepted 16000 (probe 2026-11-11); same cut-JSON tool_use at the limit as Kimi.
+	'zai.glm-5': { contextWindow: 131072, maxOutputTokens: 16000, vision: false, region: 'us-east-1' },
 };
 
 export const QWEN3_MODEL_IDS = Object.keys(qwen);
 export const OPEN_WEIGHT_MODEL_IDS = Object.keys(openWeight);
+/** Fallback answer cap for a paid model without a verified card. */
 export const MANAGED_MAX_OUTPUT_TOKENS = 4096;
 export const FREE_MAX_OUTPUT_TOKENS = 16000;
+/** Highest answer cap the Bedrock route sends; it bounds the per-step budget reservation. */
+export const BEDROCK_MAX_OUTPUT_TOKENS = 16000;
 
 export function modelCapabilities(model: string): ModelCapabilities {
 	if (qwen[model]) { return qwen[model]; }
@@ -65,6 +71,14 @@ export function modelCapabilities(model: string): ModelCapabilities {
 		vision: /anthropic\.claude-(?:3|sonnet-4|opus-4|haiku-4)/i.test(model) };
 }
 
+/**
+ * Answer cap for a paid model: its native limit, bounded by the Bedrock route. A whole file
+ * written in one tool call needs well over 4096 tokens; a cut tool call is dropped by the client.
+ */
+export function managedOutputLimit(model: string): number {
+	return Math.min(modelCapabilities(model).maxOutputTokens, BEDROCK_MAX_OUTPUT_TOKENS);
+}
+
 /** Mirrors the response cap enforced by managedBody, rather than advertising unusable output. */
 export function managedModelMetadata(model: string) {
 	const capability = modelCapabilities(model);
@@ -73,7 +87,7 @@ export function managedModelMetadata(model: string) {
 		context_length: capability.contextWindow,
 		arni_native_max_output_tokens: capability.maxOutputTokens,
 		top_provider: { context_length: capability.contextWindow,
-			max_completion_tokens: Math.min(capability.maxOutputTokens, MANAGED_MAX_OUTPUT_TOKENS) },
+			max_completion_tokens: managedOutputLimit(model) },
 		architecture: { input_modalities: capability.vision ? ['text', 'image'] : ['text'] },
 	};
 }

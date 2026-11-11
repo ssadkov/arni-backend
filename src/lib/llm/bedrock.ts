@@ -12,7 +12,7 @@ import {
 } from '@aws-sdk/client-bedrock-runtime';
 import { decodeScreenshot, screenshotCount, supportsScreenshots } from './vision';
 import { BudgetError } from '@/lib/budget';
-import { modelCapabilities } from './modelCapabilities';
+import { BEDROCK_MAX_OUTPUT_TOKENS, modelCapabilities } from './modelCapabilities';
 import { usageCostMicros, type ReportedUsage } from '../budgetPolicy';
 
 type CatalogPrice = { inputPerMillion: number | null; outputPerMillion: number | null };
@@ -328,10 +328,17 @@ function maxTokens(body: ChatBody): number {
 	if (!Number.isFinite(requested) || requested <= 0) {
 		return 4096;
 	}
-	return Math.min(Math.floor(requested), 16000);
+	return Math.min(Math.floor(requested), BEDROCK_MAX_OUTPUT_TOKENS);
 }
 
-function finishReason(stopReason: string | undefined): 'tool_calls' | 'length' | 'stop' {
+/**
+ * Some open-weight models (GLM-5, probed 2026-11-11) report `tool_use` when the answer hits
+ * maxTokens mid-call, leaving truncated JSON arguments. A spent budget is a cut answer.
+ */
+function finishReason(stopReason: string | undefined, outputTokens?: number, limit?: number): 'tool_calls' | 'length' | 'stop' {
+	if (limit && outputTokens !== undefined && outputTokens >= limit) {
+		return 'length';
+	}
 	if (stopReason === 'tool_use') {
 		return 'tool_calls';
 	}
@@ -445,7 +452,7 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 			headers.set('Content-Type', 'text/event-stream');
 			headers.set('Cache-Control', 'no-cache');
 			headers.set('Connection', 'keep-alive');
-			return new Response(openAIStream(response.stream, modelId, price), { headers });
+			return new Response(openAIStream(response.stream, modelId, price, inferenceConfig.maxTokens), { headers });
 		}
 
 		const response = await client(modelCapabilities(modelId).region || region()).send(new ConverseCommand(input));
@@ -476,7 +483,7 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 					content: text || null,
 					...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
 				},
-				finish_reason: finishReason(response.stopReason),
+				finish_reason: finishReason(response.stopReason, response.usage?.outputTokens, inferenceConfig.maxTokens),
 			}],
 			usage: bedrockUsage(modelId, response.usage || {}, price),
 		}), { headers });
@@ -501,10 +508,11 @@ export async function countBedrockInput(body: ChatBody, modelId: string) {
 	}
 }
 
-function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: string, price?: CatalogPrice | null): ReadableStream<Uint8Array> {
+function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: string, price?: CatalogPrice | null, limit?: number): ReadableStream<Uint8Array> {
 	return new ReadableStream({
 		async start(controller) {
 			let stop: string | undefined;
+			let outputTokens: number | undefined;
 			try {
 				for await (const event of events ?? []) {
 					const record = event as Record<string, any>;
@@ -536,10 +544,11 @@ function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: strin
 					}
 					const usage = record.metadata?.usage;
 					if (usage) {
+						outputTokens = usage.outputTokens;
 						controller.enqueue(sse(usagePayload(modelId, usage, price)));
 					}
 				}
-				controller.enqueue(sse(chunk(modelId, {}, finishReason(stop))));
+				controller.enqueue(sse(chunk(modelId, {}, finishReason(stop, outputTokens, limit))));
 				controller.enqueue(encoder.encode('data: [DONE]\n\n'));
 				controller.close();
 			} catch (error) {

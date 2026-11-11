@@ -2,7 +2,7 @@ import prisma from '@/lib/prisma';
 import { BudgetError } from './budget';
 import { costMicros } from './budgetPolicy';
 import { screenshotCount, supportsScreenshots, conservativeInputTokenBound } from './llm/vision';
-import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, modelCapabilities } from './llm/modelCapabilities';
+import { FREE_MAX_OUTPUT_TOKENS, managedOutputLimit, modelCapabilities } from './llm/modelCapabilities';
 import { countBedrockInput } from './llm/bedrock';
 import { routerModel, routerCacheMode, type RouterModel } from './llm/openRouterCatalog';
 
@@ -25,7 +25,8 @@ export function managedBody(body: BudgetBody, allowImages = false): BudgetBody {
 			: 'Для этого провайдера поддерживаются текст и инструменты агента. Для скриншотов выберите Claude через Bedrock.', 400);
 	}
 	// Free models cost nothing per token, and long reasoning must not end before the tool call.
-	const outputLimit = typeof body.model === 'string' && body.model.endsWith(':free') ? FREE_MAX_OUTPUT_TOKENS : MANAGED_MAX_OUTPUT_TOKENS;
+	const model = typeof body.model === 'string' ? body.model : '';
+	const outputLimit = model.endsWith(':free') ? FREE_MAX_OUTPUT_TOKENS : managedOutputLimit(model);
 	const requested = body.max_completion_tokens ?? body.max_tokens ?? outputLimit;
 	if (allowImages) { screenshotCount(body.messages); }
 	if (!Number.isFinite(requested) || requested < 1) { throw new BudgetError('invalid_output_limit', 'Некорректный лимит ответа.', 400); }
