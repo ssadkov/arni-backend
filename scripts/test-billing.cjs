@@ -28,7 +28,7 @@ require.extensions['.ts'] = (module, filename) => {
 
 const prisma = require('../src/lib/prisma.ts').default;
 const { reserveBudget, settleBudget, budgetSnapshot } = require('../src/lib/budget.ts');
-const { UsageParser, costMicros, currentWindow, FIVE_HOURS_MS } = require('../src/lib/budgetPolicy.ts');
+const { UsageParser, costMicros, currentWindow, FIVE_HOURS_MS, MAX_CONCURRENT_RESERVATIONS } = require('../src/lib/budgetPolicy.ts');
 const { usageStream } = require('../src/lib/usageStream.ts');
 const { managedBody } = require('../src/lib/budgetPricing.ts');
 const { POST: grant } = require('../src/app/api/admin/users/[id]/budget/route.ts');
@@ -76,11 +76,14 @@ async function main() {
 		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, 20_000_000);
 		assert.equal((await grantRequest(userId, { ...payload, weeklyUsd: 10 })).status, 409);
 	});
-	await check('concurrent requests cannot overspend one balance', async () => {
-		const results = await Promise.allSettled([reserveBudget(userId, 'test-model', 'bedrock', 500000, 3, 15), reserveBudget(userId, 'test-model', 'bedrock', 500000, 3, 15)]);
-		assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
-		assert.equal(results.find(result => result.status === 'rejected').reason.code, 'request_in_progress');
-		const reservation = results.find(result => result.status === 'fulfilled').value;
+	await check('concurrent requests are capped per user and cannot overspend one balance', async () => {
+		const results = await Promise.allSettled(Array.from({ length: MAX_CONCURRENT_RESERVATIONS + 1 }, () => reserveBudget(userId, 'test-model', 'bedrock', 500000, 3, 15)));
+		const fulfilled = results.filter(result => result.status === 'fulfilled').map(result => result.value);
+		assert.deepEqual({ fulfilled: fulfilled.length, rejected: results.filter(result => result.status === 'rejected').map(result => result.reason.code) },
+			{ fulfilled: MAX_CONCURRENT_RESERVATIONS, rejected: ['request_in_progress'] });
+		const [reservation, ...extra] = fulfilled;
+		// Refunding the extra steps leaves the same ledger state the later checks expect.
+		for (const row of extra) { await settleBudget(row.id, null, true); }
 		await Promise.all([settleBudget(reservation.id, { prompt_tokens: 1000, completion_tokens: 100 }), settleBudget(reservation.id, { prompt_tokens: 1000, completion_tokens: 100 })]);
 		const budget = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
 		assert.deepEqual({ balance: budget.balanceMicros, used: budget.fiveHourUsedMicros, requests: budget.fiveHourRequests, logs: await prisma.usageLog.count({ where: { userId } }) },

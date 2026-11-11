@@ -1,6 +1,6 @@
 import type { AccountBudget, Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { costMicros, usageCostMicros, currentWindow, staleReservationCutoff, FIVE_HOURS_MS, WEEK_MS, type ReportedUsage } from './budgetPolicy';
+import { costMicros, usageCostMicros, currentWindow, staleReservationCutoff, FIVE_HOURS_MS, WEEK_MS, MAX_CONCURRENT_RESERVATIONS, type ReportedUsage } from './budgetPolicy';
 
 export class BudgetError extends Error {
 	constructor(public readonly code: string, message: string, public readonly status = 429, public readonly resetsAt?: string) {
@@ -48,8 +48,8 @@ export async function reserveBudget(userId: string, model: string, source: strin
 		if (!budget.enabled || now >= budget.validUntil) {
 			throw new BudgetError('access_expired', 'Выданный доступ приостановлен или истёк. Обратитесь к администратору.', 403);
 		}
-		if (await tx.budgetReservation.findFirst({ where: { userId, status: 'pending' } })) {
-			throw new BudgetError('request_in_progress', 'Предыдущий запрос ещё выполняется. Дождитесь его завершения.');
+		if (await tx.budgetReservation.count({ where: { userId, status: 'pending' } }) >= MAX_CONCURRENT_RESERVATIONS) {
+			throw new BudgetError('request_in_progress', 'Уже выполняется несколько запросов. Дождитесь завершения одного из них.');
 		}
 		const snapshot = budgetSnapshot(budget, now);
 		for (const [name, window] of [['five_hour_limit', snapshot.fiveHour], ['weekly_limit', snapshot.weekly]] as const) {
