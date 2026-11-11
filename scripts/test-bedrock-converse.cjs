@@ -96,7 +96,9 @@ async function main() {
 	await check('model metadata carries real context, response reserve, vision and regional Qwen routing', () => {
 		assert.equal(QWEN3_MODEL_IDS.length, 7);
 		assert.equal(managedModelMetadata(model).context_length, 1_000_000);
-		assert.equal(managedModelMetadata(model).top_provider.max_completion_tokens, 4096);
+		// Probed live 2026-11-11 (scripts/probe-output-limits.cjs): one whole-file tool call needs ~12-14K tokens.
+		assert.deepEqual(['global.anthropic.claude-sonnet-4-6', 'global.anthropic.claude-haiku-4-5-20251001-v1:0', 'zai.glm-5', 'us.meta.llama3-8b']
+			.map(id => managedModelMetadata(id).top_provider.max_completion_tokens), [16000, 16000, 16000, 4096]);
 		assert.equal(modelCapabilities('us.anthropic.claude-haiku-4-5-20251001-v1:0').contextWindow, 200000);
 		assert.equal(modelCapabilities('qwen.qwen3-32b-v1:0').contextWindow, 32768);
 		assert.equal(modelCapabilities('qwen.qwen3-coder-480b-a35b-v1:0').region, 'us-west-2');
@@ -223,6 +225,29 @@ async function main() {
 			assert.equal(response.status, 400);
 			assert.equal((await response.json()).error.code, 'invalid_messages');
 			assert.equal(sent, before);
+		});
+		await check('a tool call that spends the whole output budget is reported as length, not tool_calls', async () => {
+			const input = '{"path":"a.py","content":"x';
+			runtime.BedrockRuntimeClient.prototype.send = async command => {
+				sent++;
+				const limit = command.input.inferenceConfig.maxTokens;
+				const usage = { inputTokens: 10, outputTokens: limit, totalTokens: 10 + limit };
+				if (command.constructor.name === 'ConverseStreamCommand') {
+					return { stream: (async function* () {
+						yield { contentBlockStart: { contentBlockIndex: 0, start: { toolUse: { toolUseId: 'cut', name: 'create_file' } } } };
+						yield { contentBlockDelta: { contentBlockIndex: 0, delta: { toolUse: { input } } } };
+						yield { messageStop: { stopReason: 'tool_use' } };
+						yield { metadata: { usage } };
+					})() };
+				}
+				return { output: { message: { role: 'assistant', content: [{ toolUse: { toolUseId: 'cut', name: 'create_file', input: {} } }] } }, stopReason: 'tool_use', usage };
+			};
+			const reasons = [];
+			for (const stream of [false, true]) {
+				const text = await (await completeWithBedrock({ messages: [{ role: 'user', content: 'Write it.' }], stream, max_tokens: 64 }, model)).text();
+				reasons.push(stream ? [...text.matchAll(/"finish_reason":"(\w+)"/g)].at(-1)?.[1] : JSON.parse(text).choices[0].finish_reason);
+			}
+			assert.deepEqual(reasons, ['length', 'length']);
 		});
 		await check('Bedrock validation errors retain HTTP 400 and are not retried inside the backend', async () => {
 			runtime.BedrockRuntimeClient.prototype.send = async () => { sent++; throw Object.assign(new Error('Invalid request'), { $metadata: { httpStatusCode: 400 } }); };
