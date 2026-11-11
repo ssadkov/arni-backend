@@ -89,11 +89,56 @@ async function searchExa(query: string, key: string): Promise<WebSearchHit[]> {
 	return hits;
 }
 
+async function searchBrave(query: string, key: string): Promise<WebSearchHit[]> {
+	const url = new URL('https://api.search.brave.com/res/v1/web/search');
+	url.searchParams.set('q', query);
+	url.searchParams.set('count', String(RESULT_LIMIT));
+	const response = await fetch(url, {
+		headers: { Accept: 'application/json', 'X-Subscription-Token': key },
+		redirect: 'error',
+		signal: AbortSignal.timeout(12_000),
+	});
+	if (!response.ok) {
+		console.warn('Brave web search failed', response.status);
+		return [];
+	}
+	return parseBraveWebSearch(await response.json());
+}
+
+/** Pull web results out of a Brave Search API payload. */
+export function parseBraveWebSearch(payload: unknown, limit = RESULT_LIMIT): WebSearchHit[] {
+	const results = payload && typeof payload === 'object'
+		? (payload as { web?: { results?: unknown } }).web?.results
+		: undefined;
+	if (!Array.isArray(results)) {
+		return [];
+	}
+	const hits: WebSearchHit[] = [];
+	for (const result of results) {
+		if (hits.length >= limit || !result || typeof result !== 'object') {
+			continue;
+		}
+		const record = result as { url?: unknown; title?: unknown; description?: unknown };
+		const url = typeof record.url === 'string' ? record.url.trim() : '';
+		if (!url.startsWith('https://') && !url.startsWith('http://')) {
+			continue;
+		}
+		const title = typeof record.title === 'string' ? textOf(record.title).slice(0, SNIPPET_LIMIT) : '';
+		const snippet = typeof record.description === 'string' ? textOf(record.description).slice(0, SNIPPET_LIMIT) : '';
+		hits.push({ title: title || url, url, snippet });
+	}
+	return hits;
+}
+
 function configuredSearch(): WebSearch | undefined {
 	switch (process.env.WEB_SEARCH_PROVIDER?.trim().toLowerCase() || 'yandex') {
 		case 'exa': {
 			const key = process.env.EXA_API_KEY?.trim();
 			return key ? query => searchExa(query, key) : undefined;
+		}
+		case 'brave': {
+			const key = process.env.BRAVE_SEARCH_API_KEY?.trim();
+			return key ? query => searchBrave(query, key) : undefined;
 		}
 		case 'yandex': {
 			const key = process.env.YANDEX_SEARCH_API_KEY?.trim();
@@ -117,6 +162,24 @@ export async function searchWeb(query: string): Promise<WebSearchHit[]> {
 	}
 	try {
 		return await search(trimmed);
+	} catch (error) {
+		console.warn('Web search request failed', error instanceof Error ? error.name : 'unknown');
+		return [];
+	}
+}
+
+/** Agent search uses the shared Exa key, independent of the web-chat provider. */
+export async function searchExaWeb(query: string): Promise<WebSearchHit[] | undefined> {
+	const key = process.env.EXA_API_KEY?.trim();
+	const trimmed = query.trim().slice(0, 300);
+	if (!key) {
+		return undefined;
+	}
+	if (!trimmed) {
+		return [];
+	}
+	try {
+		return await searchExa(trimmed, key);
 	} catch (error) {
 		console.warn('Web search request failed', error instanceof Error ? error.name : 'unknown');
 		return [];
