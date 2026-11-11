@@ -37,8 +37,12 @@ runtime.BedrockRuntimeClient.prototype.send = async function (command) {
 };
 const { managedBody, budgetPrice } = require('../src/lib/budgetPricing.ts');
 const { toConverse } = require('../src/lib/llm/bedrock.ts');
-const { generateImage, IMAGE_PRICE_MICROS, IMAGE_MODEL } = require('../src/lib/imageGeneration.ts');
+const { generateImage, IMAGE_PRICE_MICROS, IMAGE_MODEL, imageCatalogPublic } = require('../src/lib/imageGeneration.ts');
+const { IMAGE_MODELS } = require('../src/lib/imageModels.ts');
+const { fitImagePng } = require('../src/lib/imagePng.ts');
 const { reserveBudget, settleBudget } = require('../src/lib/budget.ts');
+const TEXT_IMAGE_MODEL = IMAGE_MODELS.find(row => row.purpose === 'text').id;
+const TEXT_IMAGE_PRICE = IMAGE_MODELS.find(row => row.purpose === 'text').costMicros;
 let userId, passed = 0;
 const check = async (name, run) => { await run(); console.log(`PASS ${name}`); passed++; };
 async function main() {
@@ -153,17 +157,67 @@ async function main() {
 		assert.deepEqual([log.model, log.requestedModel, log.costMicros], ['healthy:free', 'first:free', 0]);
 	});
 	process.env.ARNI_IMAGE_GENERATION_ENABLED = 'true';
+	await check('image catalog lists simple and text models with default Core price', async () => {
+		const catalog = imageCatalogPublic();
+		assert.equal(catalog.default_model, IMAGE_MODEL);
+		assert.equal(catalog.model, IMAGE_MODEL);
+		assert.equal(catalog.costMicros, IMAGE_PRICE_MICROS);
+		assert.deepEqual(catalog.models.map(row => row.id), IMAGE_MODELS.map(row => row.id));
+		assert.equal(catalog.models.find(row => row.purpose === 'text').costMicros, TEXT_IMAGE_PRICE);
+		process.env.JWT_SECRET = 'disposable-media-test-only';
+		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
+		const { NextRequest } = require('next/server');
+		const headers = { Authorization: `Bearer ${jwt}` };
+		const mediaGet = require('../src/app/api/images/generations/route.ts').GET;
+		const media = await (await mediaGet(new NextRequest('http://localhost/api/images/generations', { headers }))).json();
+		assert.equal(media.enabled, true);
+		assert.equal(media.models.length, 2);
+		const webGet = require('../src/app/api/web/images/config/route.ts').GET;
+		const web = await (await webGet(new NextRequest('http://localhost/api/web/images/config', { headers }))).json();
+		assert.equal(web.default_model, IMAGE_MODEL);
+		assert.equal(web.models[1].id, TEXT_IMAGE_MODEL);
+	});
 	await check('concurrent image/replay uses one invocation and one charge, changed payload conflicts', async () => {
 		const key = crypto.randomUUID(); const input = { prompt: 'A landing illustration' };
+		const before = invocations;
 		const responses = await Promise.allSettled([generateImage(userId, key, input), generateImage(userId, key, input)]);
 		const first = responses.find(response => response.status === 'fulfilled').value;
 		const again = await generateImage(userId, key, input);
-		assert.equal(first.id, again.id); assert.equal(invocations, 1);
+		assert.equal(first.id, again.id); assert.equal(invocations, before + 1);
 		assert.equal(again.costMicros, IMAGE_PRICE_MICROS);
 		await assert.rejects(generateImage(userId, key, { prompt: 'Another image' }), error => error.code === 'idempotency_conflict');
+		await assert.rejects(generateImage(userId, key, { prompt: input.prompt, model: TEXT_IMAGE_MODEL }), error => error.code === 'idempotency_conflict');
 		const log = await prisma.usageLog.findUniqueOrThrow({ where: { requestId: first.id } });
 		assert.deepEqual([log.model, log.operation, log.imageCount, log.unitPriceMicros, log.costMicros], [IMAGE_MODEL, 'image', 1, IMAGE_PRICE_MICROS, IMAGE_PRICE_MICROS]);
 		const asset = await prisma.mediaGeneration.findUniqueOrThrow({ where: { id: first.id } }); assert.deepEqual(Buffer.from(asset.image), Buffer.from(png, 'base64'));
+	});
+	await check('text image model bills 0.08 and sends mode text-to-image', async () => {
+		const before = invocations;
+		const created = await generateImage(userId, crypto.randomUUID().replace(/-/g, '').slice(0, 32), {
+			prompt: 'Logo with readable Arni Code text',
+			model: TEXT_IMAGE_MODEL,
+			aspect_ratio: '1:1',
+		});
+		assert.equal(created.model, TEXT_IMAGE_MODEL);
+		assert.equal(created.costMicros, TEXT_IMAGE_PRICE);
+		assert.equal(invocations, before + 1);
+		assert.equal(captured.modelId, TEXT_IMAGE_MODEL);
+		const body = JSON.parse(Buffer.from(captured.body).toString());
+		assert.equal(body.mode, 'text-to-image');
+		const log = await prisma.usageLog.findUniqueOrThrow({ where: { requestId: created.id } });
+		assert.deepEqual([log.model, log.unitPriceMicros, log.costMicros], [TEXT_IMAGE_MODEL, TEXT_IMAGE_PRICE, TEXT_IMAGE_PRICE]);
+	});
+	await check('oversized PNG is compressed under the product byte limit', async () => {
+		const sharp = require('sharp');
+		const { randomFillSync } = require('node:crypto');
+		const width = 2200; const height = 2200;
+		const raw = Buffer.alloc(width * height * 3);
+		randomFillSync(raw);
+		const big = await sharp(raw, { raw: { width, height, channels: 3 } }).png({ compressionLevel: 0 }).toBuffer();
+		assert.ok(big.length > 3_000_000);
+		const fitted = await fitImagePng(big);
+		assert.ok(fitted.length <= 3_000_000);
+		assert.ok(fitted.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')));
 	});
 	await check('confirmed 403 refunded; timeout/filter stays conservative and is never reinvoked by replay', async () => {
 		for (const state of ['rejected', 'timeout', 'filtered']) {

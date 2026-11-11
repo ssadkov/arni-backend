@@ -273,14 +273,24 @@ export function textFromSse(chunk: string) {
 	return text;
 }
 
-export async function generateChatImage(userId: string, chatId: string, prompt: string, aspectRatio: string) {
+export async function generateChatImage(
+	userId: string,
+	chatId: string,
+	prompt: string,
+	aspectRatio: string,
+	model?: string,
+) {
 	const trimmed = prompt.trim();
 	if (!trimmed || trimmed.length > MESSAGE_LIMIT) {
 		throw new BudgetError('empty_message', 'Опишите картинку.', 400);
 	}
 	await ownChat(userId, chatId);
 	const key = crypto.randomUUID().replace(/-/g, '');
-	const generated = await generateImage(userId, key, { prompt: trimmed, aspect_ratio: aspectRatio || '1:1' });
+	const generated = await generateImage(userId, key, {
+		prompt: trimmed,
+		aspect_ratio: aspectRatio || '1:1',
+		...(model ? { model } : {}),
+	});
 	const stored = await prisma.mediaGeneration.findFirst({ where: { id: generated.id, userId, status: 'succeeded' } });
 	if (!stored?.image) {
 		throw new BudgetError('image_failed', 'Картинка не сохранилась.', 502);

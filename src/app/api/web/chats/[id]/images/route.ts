@@ -13,9 +13,9 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 	try {
 		const { user } = await webUser(req);
 		const { id } = await context.params;
-		const body = await req.json().catch(() => null) as { prompt?: string; aspect_ratio?: string } | null;
-		const ratio = body?.aspect_ratio && IMAGE_RATIOS.includes(body.aspect_ratio) ? body.aspect_ratio : '1:1';
-		const created = await generateChatImage(user.id, id, body?.prompt || '', ratio);
+		const body = await req.json().catch(() => null) as { prompt?: string; aspect_ratio?: string; model?: string } | null;
+		const ratio = body?.aspect_ratio && (IMAGE_RATIOS as readonly string[]).includes(body.aspect_ratio) ? body.aspect_ratio : '1:1';
+		const created = await generateChatImage(user.id, id, body?.prompt || '', ratio, body?.model);
 		return webJson(req, created, 201);
 	} catch (error) {
 		const known = error instanceof BudgetError;

@@ -20,6 +20,7 @@
         "next": "16.3.4",
         "react": "19.2.8",
         "react-dom": "19.2.8",
+        "sharp": "^0.34.4",
         "tiktoken": "^1.0.22",
         "uuid": "^14.0.2"
     },
@@ -34,5 +35,9 @@
         "prisma": "^5.22.0",
         "tailwindcss": "^4",
         "typescript": "^5"
+    },
+    "allowScripts": {
+        "sharp@0.35.5": true,
+        "sharp@0.34.4": true
     }
 }
