@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import prisma from '@/lib/prisma';
 import { encryptJWT } from '@/lib/jwt';
 import { accountPayload } from '@/lib/freeSteps';
+import { desktopCorsHeaders } from '@/lib/desktopCors';
 
-export async function POST(req: NextRequest) {
+async function exchange(req: NextRequest): Promise<NextResponse> {
   try {
     const body = await req.json();
     const { provider, token } = body;
@@ -183,4 +184,17 @@ export async function POST(req: NextRequest) {
     console.error('Auth Exchange Error:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
+}
+
+/** The Agents window calls this from the renderer, so the response carries CORS for its origin. */
+export async function POST(req: NextRequest) {
+  const response = await exchange(req);
+  for (const [name, value] of Object.entries(desktopCorsHeaders(req))) {
+    response.headers.set(name, value);
+  }
+  return response;
+}
+
+export function OPTIONS(req: NextRequest) {
+  return new NextResponse(null, { status: 204, headers: desktopCorsHeaders(req) });
 }
