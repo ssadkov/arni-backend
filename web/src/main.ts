@@ -36,6 +36,7 @@ type Model = {
 type ImageGenModel = {
   id: string;
   name: string;
+  modelName?: string;
   description: string;
   purpose: 'simple' | 'text';
   costMicros: number;
@@ -287,7 +288,7 @@ function renderApp() {
               <button id="send" class="primary icon-button send-button" type="submit" aria-label="Отправить">${icon('send')}</button>
             </div>
             <div id="image-gen-picker" class="image-gen-picker" hidden>
-              <p class="image-gen-hint muted">Выберите тип картинки. Сервер не угадывает модель по тексту.</p>
+              <p class="image-gen-hint muted">Выберите тип картинки. Описание лучше на английском — русский Stability сейчас отклоняет. Сервер не угадывает модель сам.</p>
               <div id="image-gen-options" class="image-gen-options" role="radiogroup" aria-label="Модель изображения"></div>
             </div>
             <p id="status" class="composer-status" role="status" hidden></p>
@@ -532,7 +533,7 @@ function paintImageGenModels() {
   }
   const current = selectedImageGenModel();
   options.innerHTML = imageModels.map(model => `<button type="button" class="image-gen-option" data-image-model="${escapeHtml(model.id)}" aria-pressed="${model.id === current}">
-    <span><strong>${escapeHtml(model.name)}</strong><small>${escapeHtml(model.description)} · ${usd(model.costMicros)}</small></span>
+    <span><strong>${escapeHtml(model.name)}</strong><small>${escapeHtml(model.modelName || model.id)} · ${usd(model.costMicros)} · ${escapeHtml(model.description)}</small></span>
     ${model.id === current ? icon('check') : ''}
   </button>`).join('');
   options.querySelectorAll<HTMLButtonElement>('[data-image-model]').forEach(button => button.addEventListener('click', () => {
@@ -792,7 +793,7 @@ async function send(draw: boolean) {
   sending = true;
   setToolsOpen(false);
   setStatus(draw
-    ? `Создаём изображение${imageGenCard ? ` · ${imageGenCard.name} · ${usd(imageGenCard.costMicros)}` : ''}…`
+    ? `Создаём изображение${imageGenCard ? ` · ${imageGenCard.name} · ${imageGenCard.modelName || imageGenCard.id} · ${usd(imageGenCard.costMicros)}` : ''}…`
     : 'Готовим ответ…');
   paintChats();
   paintComposer();

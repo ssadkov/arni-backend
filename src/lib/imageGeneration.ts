@@ -9,6 +9,7 @@ import {
 	IMAGE_REGION,
 	imageCatalogPublic,
 	imageModelCard,
+	promptHasUnsupportedScript,
 	type ImageModelCard,
 } from './imageModels';
 import { fitImagePng, isPng } from './imagePng';
@@ -83,6 +84,14 @@ export async function generateImage(userId: string, requestKey: string, body: un
 	if (process.env.ARNI_IMAGE_GENERATION_ENABLED !== 'true' || !process.env.AWS_BEARER_TOKEN_BEDROCK_IMAGES) {
 		throw new BudgetError('image_generation_disabled', 'Генерация изображений пока не включена. Администратору нужно активировать модели в AWS us-west-2 и настроить backend.', 503);
 	}
+	// Stability rejects Cyrillic prompts before billing us a useful image; stop before reserve/InvokeModel.
+	if (promptHasUnsupportedScript(input.prompt)) {
+		throw new BudgetError(
+			'image_prompt_language',
+			'Модели Stability сейчас отклоняют описание на русском. Перепишите prompt на английском — тогда генерация пройдёт без лишнего списания.',
+			400,
+		);
+	}
 	// Budget is mandatory: free chat access never enables paid image generation.
 	if (!await prisma.accountBudget.findUnique({ where: { userId } })) { throw new BudgetError('image_budget_required', 'Для генерации изображений нужен выданный бюджет API.', 403); }
 	let row;
@@ -124,8 +133,17 @@ export async function generateImage(userId: string, requestKey: string, body: un
 			seeds?: number[];
 			finish_reasons?: Array<string | null>;
 		};
-		if (data.finish_reasons?.some(reason => reason != null) || data.images?.length !== 1 || typeof data.images[0] !== 'string') {
-			throw new BudgetError('image_filtered', 'Модель не вернула изображение. Запрос не повторяется автоматически.', 422);
+		const blocked = data.finish_reasons?.find(reason => reason != null) || null;
+		if (blocked != null || data.images?.length !== 1 || typeof data.images[0] !== 'string') {
+			const filter = typeof blocked === 'string' ? blocked : '';
+			const languageHint = /prompt/i.test(filter)
+				? ' Часто так бывает с неанглийским описанием — попробуйте английский prompt.'
+				: '';
+			throw new BudgetError(
+				'image_filtered',
+				`Модель ${card.modelName} не вернула изображение${filter ? ` (${filter})` : ''}. Запрос не повторяется автоматически.${languageHint}`,
+				422,
+			);
 		}
 		const raw = Buffer.from(data.images[0], 'base64');
 		if (!isPng(raw)) {

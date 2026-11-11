@@ -164,6 +164,10 @@ async function main() {
 		assert.equal(catalog.costMicros, IMAGE_PRICE_MICROS);
 		assert.deepEqual(catalog.models.map(row => row.id), IMAGE_MODELS.map(row => row.id));
 		assert.equal(catalog.models.find(row => row.purpose === 'text').costMicros, TEXT_IMAGE_PRICE);
+		assert.equal(catalog.models[0].modelName, 'Stable Image Core');
+		assert.equal(catalog.models[1].modelName, 'Stable Diffusion 3.5 Large');
+		await assert.rejects(generateImage(userId, crypto.randomUUID().replace(/-/g, '').slice(0, 32), { prompt: 'рыжий кот на диване' }), error => error.code === 'image_prompt_language');
+		assert.equal(invocations, 0);
 		process.env.JWT_SECRET = 'disposable-media-test-only';
 		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
 		const { NextRequest } = require('next/server');

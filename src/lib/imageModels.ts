@@ -4,7 +4,10 @@ export type ImagePurpose = 'simple' | 'text';
 
 export type ImageModelCard = {
 	id: string;
+	/** Short product label shown in pickers. */
 	name: string;
+	/** Provider model title, e.g. Stable Image Core. */
+	modelName: string;
 	description: string;
 	purpose: ImagePurpose;
 	costMicros: number;
@@ -20,7 +23,8 @@ export const IMAGE_MODELS: readonly ImageModelCard[] = [
 	{
 		id: 'stability.stable-image-core-v1:1',
 		name: 'Простые картинки',
-		description: 'Быстро и дешево. Текст на изображении обычно нечитаемый.',
+		modelName: 'Stable Image Core',
+		description: 'Быстро и дешево. Текст на изображении обычно нечитаемый. Описание лучше на английском.',
 		purpose: 'simple',
 		costMicros: 40_000,
 		includeMode: false,
@@ -28,7 +32,8 @@ export const IMAGE_MODELS: readonly ImageModelCard[] = [
 	{
 		id: 'stability.sd3-5-large-v1:0',
 		name: 'Картинки с текстом',
-		description: 'Дороже. Лучше пишет надписи вроде логотипов и заголовков.',
+		modelName: 'Stable Diffusion 3.5 Large',
+		description: 'Дороже. Лучше пишет надписи вроде логотипов и заголовков. Описание лучше на английском.',
 		purpose: 'text',
 		costMicros: 80_000,
 		includeMode: true,
@@ -56,12 +61,18 @@ export function imageCatalogPublic() {
 		model: IMAGE_MODEL,
 		costMicros: IMAGE_PRICE_MICROS,
 		aspect_ratios: [...IMAGE_RATIOS],
-		models: IMAGE_MODELS.map(({ id, name, description, purpose, costMicros }) => ({
+		models: IMAGE_MODELS.map(({ id, name, modelName, description, purpose, costMicros }) => ({
 			id,
 			name,
+			modelName,
 			description,
 			purpose,
 			costMicros,
 		})),
 	};
+}
+
+/** Stability image models currently reject Cyrillic prompts (`Filter reason: prompt`). */
+export function promptHasUnsupportedScript(prompt: string) {
+	return /[\u0400-\u04FF]/.test(prompt);
 }
