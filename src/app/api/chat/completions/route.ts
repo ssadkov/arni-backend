@@ -16,6 +16,7 @@ import { resolveLlmProvider } from '@/lib/llm/provider';
 import { recordModelRequest } from '@/lib/modelRequests';
 import { rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
 import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
+import { CONTEXT_ERROR_MESSAGE, isContextError } from '@/lib/llm/contextError';
 import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
 import { validUsage, type ReportedUsage } from '@/lib/budgetPolicy';
 import { usageStream } from '@/lib/usageStream';
@@ -242,8 +243,10 @@ export async function POST(req: NextRequest) {
         freeSteps = await releaseFreeStep(reservedUserId);
         reservedUserId = null;
       }
-      return new NextResponse(errorText, {
-        status: response.status,
+      // A provider's context overflow reads as a generic failure; retrying the same request never helps.
+      const contextOverflow = isContextError(response.status, errorText);
+      return new NextResponse(contextOverflow ? JSON.stringify({ error: { code: 'context_too_large', message: CONTEXT_ERROR_MESSAGE } }) : errorText, {
+        status: contextOverflow ? 400 : response.status,
         headers: freeSteps ? freeStepHeaders(freeSteps) : undefined,
       });
     }

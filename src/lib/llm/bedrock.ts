@@ -335,6 +335,16 @@ function maxTokens(body: ChatBody): number {
  * Some open-weight models (GLM-5, probed 2026-11-11) report `tool_use` when the answer hits
  * maxTokens mid-call, leaving truncated JSON arguments. A spent budget is a cut answer.
  */
+/**
+ * Visible text for an answer cut by maxTokens. Without it the agent stops silently: the client
+ * drops a cut tool call and shows nothing (two Sonnet turns on 2026-11-11 ended this way).
+ */
+export function lengthNotice(cutToolCall: boolean): string {
+	return cutToolCall
+		? '\n\nОтвет оборвался: модель упёрлась в лимит длины, пока готовила действие, и оно не выполнено. Попросите сделать то же самое по частям, например записать файл в несколько шагов.'
+		: '\n\nОтвет достиг лимита длины и мог оборваться. Напишите «Продолжи».';
+}
+
 function finishReason(stopReason: string | undefined, outputTokens?: number, limit?: number): 'tool_calls' | 'length' | 'stop' {
 	if (limit && outputTokens !== undefined && outputTokens >= limit) {
 		return 'length';
@@ -470,6 +480,7 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 					arguments: JSON.stringify(tool.input ?? {}),
 				},
 			}));
+		const finish = finishReason(response.stopReason, response.usage?.outputTokens, inferenceConfig.maxTokens);
 		const headers = providerHeaders(modelId);
 		headers.set('Content-Type', 'application/json');
 		return new Response(JSON.stringify({
@@ -480,10 +491,10 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 				index: 0,
 				message: {
 					role: 'assistant',
-					content: text || null,
+					content: finish === 'length' ? (text || '') + lengthNotice(toolCalls.length > 0) : text || null,
 					...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
 				},
-				finish_reason: finishReason(response.stopReason, response.usage?.outputTokens, inferenceConfig.maxTokens),
+				finish_reason: finish,
 			}],
 			usage: bedrockUsage(modelId, response.usage || {}, price),
 		}), { headers });
@@ -513,11 +524,13 @@ function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: strin
 		async start(controller) {
 			let stop: string | undefined;
 			let outputTokens: number | undefined;
+			let toolCallStarted = false;
 			try {
 				for await (const event of events ?? []) {
 					const record = event as Record<string, any>;
 					const start = record.contentBlockStart;
 					if (start?.start?.toolUse) {
+						toolCallStarted = true;
 						controller.enqueue(sse(chunk(modelId, {
 							tool_calls: [{
 								index: start.contentBlockIndex ?? 0,
@@ -548,7 +561,11 @@ function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: strin
 						controller.enqueue(sse(usagePayload(modelId, usage, price)));
 					}
 				}
-				controller.enqueue(sse(chunk(modelId, {}, finishReason(stop, outputTokens, limit))));
+				const finish = finishReason(stop, outputTokens, limit);
+				if (finish === 'length') {
+					controller.enqueue(sse(chunk(modelId, { content: lengthNotice(toolCallStarted) })));
+				}
+				controller.enqueue(sse(chunk(modelId, {}, finish)));
 				controller.enqueue(encoder.encode('data: [DONE]\n\n'));
 				controller.close();
 			} catch (error) {
