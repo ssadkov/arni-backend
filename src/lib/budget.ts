@@ -1,6 +1,6 @@
 import type { AccountBudget, Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { costMicros, usageCostMicros, currentWindow, FIVE_HOURS_MS, WEEK_MS, type ReportedUsage } from './budgetPolicy';
+import { costMicros, usageCostMicros, currentWindow, staleReservationCutoff, FIVE_HOURS_MS, WEEK_MS, type ReportedUsage } from './budgetPolicy';
 
 export class BudgetError extends Error {
 	constructor(public readonly code: string, message: string, public readonly status = 429, public readonly resetsAt?: string) {
@@ -33,6 +33,12 @@ export async function reserveBudget(userId: string, model: string, source: strin
 	if (!Number.isSafeInteger(reservedMicros) || reservedMicros < 0 || reservedMicros > 1_000_000_000
 		|| ![inputPerMillion, outputPerMillion].every(value => Number.isFinite(value) && value >= 0)) {
 		throw new BudgetError('pricing_unavailable', 'Некорректный резерв API.', 503);
+	}
+	// A function killed mid-stream never settles its reservation; without this the user is locked out of paid models.
+	const stale = await prisma.budgetReservation.findMany({ where: { userId, status: 'pending', createdAt: { lt: staleReservationCutoff(new Date()) } }, select: { id: true } });
+	for (const { id } of stale) {
+		console.warn(`Settling stale budget reservation ${id}`);
+		await settleBudget(id, null);
 	}
 	return prisma.$transaction(async tx => {
 		const budget = await lockBudget(tx, userId);
