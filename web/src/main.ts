@@ -5,6 +5,7 @@ import { renderMarkdown } from './markdown';
 const API = (import.meta.env.VITE_API_ORIGIN || 'https://api.arnion.ru').replace(/\/$/, '');
 const TOKEN_KEY = 'arni.web.token';
 const MODEL_KEY = 'arni.web.model';
+const IMAGE_GEN_MODEL_KEY = 'arni.web.imageGenModel';
 const FREE_ONLY_KEY = 'arni.web.freeOnly';
 
 type Chat = { id: string; title: string; updatedAt: string };
@@ -32,6 +33,13 @@ type Model = {
   arni_provider?: string;
   architecture?: { input_modalities?: string[] };
 };
+type ImageGenModel = {
+  id: string;
+  name: string;
+  description: string;
+  purpose: 'simple' | 'text';
+  costMicros: number;
+};
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) {
@@ -46,6 +54,9 @@ let account: Account | null = null;
 let models: Model[] = [];
 let pendingImage: { file: File; preview: string; id?: string } | null = null;
 let imageMode = false;
+let imageModels: ImageGenModel[] = [];
+let imageGenEnabled: boolean | null = null;
+let imageGenDefault = '';
 let sending = false;
 let opening = false;
 let modelsLoading = false;
@@ -100,6 +111,43 @@ function selectedModel() {
   return models.find(model => model.id === stored)?.id || models.find(model => model.arni_default)?.id || models[0]?.id || '';
 }
 
+function selectedImageGenModel() {
+  const stored = localStorage.getItem(IMAGE_GEN_MODEL_KEY);
+  return imageModels.find(model => model.id === stored)?.id
+    || imageModels.find(model => model.id === imageGenDefault)?.id
+    || imageModels[0]?.id
+    || '';
+}
+
+async function refreshImageConfig() {
+  if (!token) {
+    imageModels = [];
+    imageGenEnabled = null;
+    return;
+  }
+  try {
+    const response = await api('/api/web/images/config');
+    if (!response.ok) {
+      throw new Error('Image config unavailable');
+    }
+    const body = await response.json() as {
+      enabled?: boolean;
+      default_model?: string;
+      models?: ImageGenModel[];
+    };
+    imageGenEnabled = body.enabled === true;
+    imageGenDefault = body.default_model || '';
+    imageModels = Array.isArray(body.models) ? body.models : [];
+  } catch {
+    imageGenEnabled = false;
+    imageModels = [];
+  }
+  if (document.querySelector('#composer')) {
+    paintImageGenModels();
+    paintComposer();
+  }
+}
+
 async function boot() {
   const params = new URLSearchParams(location.search);
   const code = params.get('code');
@@ -150,6 +198,7 @@ async function enterApp() {
   await refreshChats();
   renderApp();
   void refreshModels();
+  void refreshImageConfig();
 }
 
 const YANDEX_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#FC3F1D"/><path fill="#fff" d="M13.32 7.67h-.93c-1.7 0-2.6.86-2.6 2.13 0 1.44.62 2.11 1.89 2.97l1.05.7-3.02 4.52H7.45l2.72-4.04c-1.56-1.12-2.44-2.2-2.44-4.04 0-2.3 1.6-3.87 4.65-3.87h3.03v11.95h-2.09V7.67z"/></svg>';
@@ -237,6 +286,10 @@ function renderApp() {
               <button id="image-mode" class="mode-button" type="button" aria-label="Выйти из режима создания изображения" hidden>${icon('spark')} Изображение ${icon('close')}</button>
               <button id="send" class="primary icon-button send-button" type="submit" aria-label="Отправить">${icon('send')}</button>
             </div>
+            <div id="image-gen-picker" class="image-gen-picker" hidden>
+              <p class="image-gen-hint muted">Выберите тип картинки. Сервер не угадывает модель по тексту.</p>
+              <div id="image-gen-options" class="image-gen-options" role="radiogroup" aria-label="Модель изображения"></div>
+            </div>
             <p id="status" class="composer-status" role="status" hidden></p>
           </form>
         </div>
@@ -307,7 +360,12 @@ function renderApp() {
     imageMode = true;
     setToolsOpen(false);
     paintComposer();
-    document.querySelector<HTMLTextAreaElement>('#input')?.focus();
+    void refreshImageConfig().then(() => {
+      if (imageGenEnabled === false) {
+        setStatus('Генерация изображений пока недоступна для этого аккаунта.', true);
+      }
+      document.querySelector<HTMLTextAreaElement>('#input')?.focus();
+    });
   });
   document.querySelector('#image-mode')?.addEventListener('click', () => {
     imageMode = false;
@@ -458,6 +516,32 @@ function setStatus(text: string, error = false) {
   }
 }
 
+function paintImageGenModels() {
+  const picker = document.querySelector<HTMLElement>('#image-gen-picker');
+  const options = document.querySelector('#image-gen-options');
+  if (!picker || !options) {
+    return;
+  }
+  picker.hidden = !imageMode;
+  if (!imageMode) {
+    return;
+  }
+  if (!imageModels.length) {
+    options.innerHTML = '<p class="muted">Загружаем модели изображений…</p>';
+    return;
+  }
+  const current = selectedImageGenModel();
+  options.innerHTML = imageModels.map(model => `<button type="button" class="image-gen-option" data-image-model="${escapeHtml(model.id)}" aria-pressed="${model.id === current}">
+    <span><strong>${escapeHtml(model.name)}</strong><small>${escapeHtml(model.description)} · ${usd(model.costMicros)}</small></span>
+    ${model.id === current ? icon('check') : ''}
+  </button>`).join('');
+  options.querySelectorAll<HTMLButtonElement>('[data-image-model]').forEach(button => button.addEventListener('click', () => {
+    localStorage.setItem(IMAGE_GEN_MODEL_KEY, button.dataset.imageModel!);
+    paintImageGenModels();
+    paintComposer();
+  }));
+}
+
 function paintComposer() {
   const input = document.querySelector<HTMLTextAreaElement>('#input')!;
   input.placeholder = imageMode ? 'Опишите изображение' : 'Спросите что угодно';
@@ -472,8 +556,10 @@ function paintComposer() {
   document.querySelector<HTMLButtonElement>('#show-models')!.disabled = sending;
   document.querySelector<HTMLButtonElement>('#new-chat')!.disabled = sending || opening;
   document.querySelector<HTMLButtonElement>('#sign-out')!.disabled = sending || opening;
+  paintImageGenModels();
+  const imageModelReady = !!selectedImageGenModel() && imageGenEnabled !== false;
   document.querySelector<HTMLButtonElement>('#send')!.disabled = sending || opening || (imageMode
-    ? !input.value.trim()
+    ? !input.value.trim() || !imageModelReady
     : !selectedModel() || (!input.value.trim() && !pendingImage));
 }
 
@@ -694,9 +780,20 @@ async function send(draw: boolean) {
     return;
   }
 
+  const imageGenModel = draw ? selectedImageGenModel() : '';
+  const imageGenCard = draw ? imageModels.find(item => item.id === imageGenModel) : undefined;
+  if (draw && (!imageGenModel || imageGenEnabled === false)) {
+    setStatus(imageGenEnabled === false
+      ? 'Генерация изображений пока недоступна для этого аккаунта.'
+      : 'Выберите модель изображения.', true);
+    return;
+  }
+
   sending = true;
   setToolsOpen(false);
-  setStatus(draw ? 'Создаём изображение…' : 'Готовим ответ…');
+  setStatus(draw
+    ? `Создаём изображение${imageGenCard ? ` · ${imageGenCard.name} · ${usd(imageGenCard.costMicros)}` : ''}…`
+    : 'Готовим ответ…');
   paintChats();
   paintComposer();
   let submitted = false;
@@ -714,7 +811,9 @@ async function send(draw: boolean) {
 
     const imageId = image ? await uploadImage(image) : undefined;
     const path = draw ? 'images' : 'messages';
-    const payload = draw ? { prompt: text, aspect_ratio: '1:1' } : { text, model, imageId };
+    const payload = draw
+      ? { prompt: text, aspect_ratio: '1:1', model: imageGenModel }
+      : { text, model, imageId };
     submitted = true;
     const response = await api(`/api/web/chats/${activeId}/${path}`, {
       method: 'POST',
