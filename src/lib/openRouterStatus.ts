@@ -231,10 +231,39 @@ export function rememberUnavailable(model: string): void {
 	});
 }
 
+/**
+ * OpenRouter refuses some free models to our key for good, e.g. "only available on agentic
+ * harnesses". Endpoint status still reads green for them, so routing kept picking them.
+ * A refusal is remembered for hours, not for the 30-second status window.
+ */
+const REJECTED_TTL_MS = 6 * 60 * 60 * 1000;
+const rejectedModels = new Map<string, number>();
+
+/** A 403 that refuses the model itself. Moderation of the user's text is not the model's fault. */
+export function isModelAccessDenied(status: number, errorText: string): boolean {
+	return status === 403 && !/moderat|flagged/i.test(errorText);
+}
+
+export function rememberRejected(model: string, now = Date.now()): void {
+	rejectedModels.set(model, now);
+}
+
+export function isRejected(model: string, now = Date.now()): boolean {
+	const at = rejectedModels.get(model);
+	if (at === undefined) {
+		return false;
+	}
+	if (now - at >= REJECTED_TTL_MS) {
+		rejectedModels.delete(model);
+		return false;
+	}
+	return true;
+}
+
 export async function trafficByModel(models: readonly string[]): Promise<Map<string, TrafficLight>> {
 	const unique = [...new Set(models)];
 	const statuses = await Promise.all(unique.map(model => cachedEndpointStatus(model)));
-	return new Map(statuses.map(status => [status.model, modelTrafficLight(status)]));
+	return new Map(statuses.map(status => [status.model, isRejected(status.model) ? 'red' : modelTrafficLight(status)]));
 }
 
 /**

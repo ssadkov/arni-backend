@@ -214,7 +214,7 @@ async function main() {
 		Module._load = function (name, parent, ...rest) {
 			if (name === '@/lib/jwt') { return { decryptJWT: async () => ({ userId }) }; }
 			if (name === 'next/server') { return { ...originalLoad.call(this, name, parent, ...rest), after: () => {} }; }
-			if (name === '@/lib/openRouterStatus') { return { routeFreeModel: async model => ({ model }), rememberUnavailable: () => {} }; }
+			if (name === '@/lib/openRouterStatus') { return { routeFreeModel: async model => ({ model }), rememberUnavailable: () => {}, rememberRejected: () => {}, isModelAccessDenied: () => false }; }
 			if (name === '@/lib/llm/bedrock' || name === '@/lib/llm/openrouter') {
 				const complete = async () => {
 					calls++;
@@ -285,7 +285,7 @@ async function main() {
 		Module._load = function (name, parent, ...rest) {
 			if (name === '@/lib/jwt') { return { decryptJWT: async () => ({ userId }) }; }
 			if (name === 'next/server') { return { ...originalLoad.call(this, name, parent, ...rest), after: () => {} }; }
-			if (name === '@/lib/openRouterStatus') { return { routeFreeModel: async model => ({ model }), rememberUnavailable: () => {} }; }
+			if (name === '@/lib/openRouterStatus') { return { routeFreeModel: async model => ({ model }), rememberUnavailable: () => {}, rememberRejected: () => {}, isModelAccessDenied: () => false }; }
 			if (name === '@/lib/llm/openrouter') { return { completeWithOpenRouter: async () => {
 				calls++;
 				if (mode === 'error') { return new Response('refused', { status: 429 }); }

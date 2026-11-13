@@ -14,7 +14,8 @@ import { modelIdForUser } from '@/lib/llm/bedrockAccess';
 import { completeWithOpenRouter } from '@/lib/llm/openrouter';
 import { resolveLlmProvider } from '@/lib/llm/provider';
 import { recordModelRequest } from '@/lib/modelRequests';
-import { rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
+import { isModelAccessDenied, rememberRejected, rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
+import { chatIdHeader } from '@/lib/chatIdHeader';
 import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
 import { CONTEXT_ERROR_MESSAGE, isContextError } from '@/lib/llm/contextError';
 import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
@@ -46,8 +47,7 @@ function freeLimitResponse(snapshot: FreeStepSnapshot) {
 export async function POST(req: NextRequest) {
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
-  const candidateChatId = req.headers.get('X-Arni-Chat-Id');
-  const chatId = candidateChatId && /^[a-zA-Z0-9:._/-]{1,200}$/.test(candidateChatId) ? candidateChatId : undefined;
+  const chatId = chatIdHeader(req.headers);
   let reservedUserId: string | null = null;
   let trackedUserId: string | undefined;
   let trackedModel = 'unknown';
@@ -208,11 +208,12 @@ export async function POST(req: NextRequest) {
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.
-    if (isFreeModel && [429, 502, 503].includes(response.status)) {
+    const refusedText = isFreeModel && response.status === 403 ? await response.clone().text() : '';
+    if (isFreeModel && ([429, 502, 503].includes(response.status) || isModelAccessDenied(response.status, refusedText))) {
       const failedModel = trackedModel;
       const errorText = await response.text();
       await track(response.status, errorText, failedModel);
-      rememberUnavailable(failedModel);
+      if (response.status === 403) { rememberRejected(failedModel); } else { rememberUnavailable(failedModel); }
       const candidates = (await routerCatalog()).filter(model => zeroPrice(model) && (!images || model.architecture?.input_modalities?.includes('image'))).map(model => model.id);
       const routed = await routeFreeModel(failedModel, candidates);
       if (routed.routedFrom && routed.model !== failedModel) {
@@ -252,6 +253,8 @@ export async function POST(req: NextRequest) {
     }
 
     await track(response.status, null, servedModel);
+    // The client shows which model actually answered when a free model was replaced.
+    const servedHeaders: Record<string, string> = routedFrom ? { 'X-Arni-Served-Model': servedModel, 'X-Arni-Routed-From': routedFrom } : {};
 
     // Шаг уже зарезервирован: ответ OpenRouter принят, даже если поток оборвётся.
     reservedUserId = null;
@@ -292,6 +295,7 @@ export async function POST(req: NextRequest) {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
+          ...servedHeaders,
           ...(freeSteps ? freeStepHeaders(freeSteps) : {}),
         },
       });
@@ -302,7 +306,7 @@ export async function POST(req: NextRequest) {
     await recordUsage(validUsage(json.usage));
 
     return NextResponse.json(json, {
-      headers: freeSteps ? freeStepHeaders(freeSteps) : undefined,
+      headers: { ...servedHeaders, ...(freeSteps ? freeStepHeaders(freeSteps) : {}) },
     });
 
   } catch (error) {

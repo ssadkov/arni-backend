@@ -195,13 +195,13 @@ async function main() {
 		assert.deepEqual([log.model, log.operation, log.imageCount, log.unitPriceMicros, log.costMicros], [IMAGE_MODEL, 'image', 1, IMAGE_PRICE_MICROS, IMAGE_PRICE_MICROS]);
 		const asset = await prisma.mediaGeneration.findUniqueOrThrow({ where: { id: first.id } }); assert.deepEqual(Buffer.from(asset.image), Buffer.from(png, 'base64'));
 	});
-	await check('text image model bills 0.08 and sends mode text-to-image', async () => {
+	await check('text image model bills 0.08 to its chat and sends mode text-to-image', async () => {
 		const before = invocations;
 		const created = await generateImage(userId, crypto.randomUUID().replace(/-/g, '').slice(0, 32), {
 			prompt: 'Logo with readable Arni Code text',
 			model: TEXT_IMAGE_MODEL,
 			aspect_ratio: '1:1',
-		});
+		}, 'desktop-chat-1');
 		assert.equal(created.model, TEXT_IMAGE_MODEL);
 		assert.equal(created.costMicros, TEXT_IMAGE_PRICE);
 		assert.equal(invocations, before + 1);
@@ -209,7 +209,7 @@ async function main() {
 		const body = JSON.parse(Buffer.from(captured.body).toString());
 		assert.equal(body.mode, 'text-to-image');
 		const log = await prisma.usageLog.findUniqueOrThrow({ where: { requestId: created.id } });
-		assert.deepEqual([log.model, log.unitPriceMicros, log.costMicros], [TEXT_IMAGE_MODEL, TEXT_IMAGE_PRICE, TEXT_IMAGE_PRICE]);
+		assert.deepEqual([log.model, log.unitPriceMicros, log.costMicros, log.chatId], [TEXT_IMAGE_MODEL, TEXT_IMAGE_PRICE, TEXT_IMAGE_PRICE, 'desktop-chat-1']);
 	});
 	await check('oversized PNG is compressed under the product byte limit', async () => {
 		const sharp = require('sharp');

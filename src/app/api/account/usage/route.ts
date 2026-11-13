@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
 		prisma.usageLog.aggregate({ where, _sum: { costMicros: true }, _count: true }),
 		prisma.usageLog.groupBy({ by: ['model'], where, _sum: { costMicros: true, promptTokens: true, completionTokens: true, cacheReadTokens: true }, _count: true }),
 		prisma.usageLog.findMany({ where, orderBy: { createdAt: 'desc' }, take: 100,
-			select: { requestId: true, model: true, chatId: true, createdAt: true, costMicros: true, accounting: true, promptTokens: true, completionTokens: true, cacheReadTokens: true, cacheWriteTokens: true } }),
+			select: { requestId: true, model: true, requestedModel: true, chatId: true, createdAt: true, costMicros: true, accounting: true, promptTokens: true, completionTokens: true, cacheReadTokens: true, cacheWriteTokens: true } }),
 	]);
 	return NextResponse.json({ currency: 'USD', chatId, totalMicros: total._sum.costMicros || 0, requestCount: total._count, models, requests }, { headers: { 'Cache-Control': 'private, no-store' } });
 }

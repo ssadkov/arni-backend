@@ -71,7 +71,8 @@ async function result(row: { id: string; model: string; status: string; errorCod
 	return { id: row.id, model: row.model, costMicros: usage?.costMicros ?? null, data: [{ url: `/api/images/${row.id}`, mime_type: 'image/png' }] };
 }
 
-export async function generateImage(userId: string, requestKey: string, body: unknown) {
+/** `chatId` attributes the charge to the desktop chat, so its cost shows in "Последний чат". */
+export async function generateImage(userId: string, requestKey: string, body: unknown, chatId?: string) {
 	if (!/^[a-zA-Z0-9_-]{16,100}$/.test(requestKey)) { throw new BudgetError('idempotency_key_required', 'Нужен Idempotency-Key длиной 16–100 символов.', 400); }
 	const input = imageRequest(body);
 	const card = imageModelCard(input.model);
@@ -112,6 +113,7 @@ export async function generateImage(userId: string, requestKey: string, body: un
 		const reservation = await reserveBudget(userId, card.id, 'bedrock', card.costMicros, 0, 0, {
 			requestId: row.id,
 			requestedModel: card.id,
+			chatId,
 			operation: 'image',
 			region: IMAGE_REGION,
 			unitPriceMicros: card.costMicros,
