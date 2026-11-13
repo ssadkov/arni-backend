@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { BudgetError } from '@/lib/budget';
+import { chatIdHeader } from '@/lib/chatIdHeader';
 import { generateImage, imageCatalogPublic } from '@/lib/imageGeneration';
 import { mediaUser } from '@/lib/mediaAuth';
 import prisma from '@/lib/prisma';
@@ -35,7 +36,7 @@ export async function POST(req: NextRequest) {
 		} catch {
 			throw new BudgetError('invalid_json', 'Некорректный JSON.', 400);
 		}
-		return NextResponse.json(await generateImage(user.id, req.headers.get('idempotency-key') || '', body), {
+		return NextResponse.json(await generateImage(user.id, req.headers.get('idempotency-key') || '', body, chatIdHeader(req.headers)), {
 			headers: { 'Cache-Control': 'private, no-store' },
 		});
 	} catch (error) {

@@ -46,9 +46,11 @@ export async function GET(req: NextRequest) {
 		let router: RouterModel[];
 		try { router = await routerCatalog(); }
 		catch (error) { if (!bedrock.length) { throw error; } router = []; }
-		const [lights, rates] = await Promise.all([trafficByModel(WATCHED_FREE_MODELS), billingRates()]);
 		// Paid OpenRouter models are not offered: Arni pays for them in cash, not AWS credits.
-		const models = pickFreeModels(router.filter(model => zeroPrice(model))).map(model => ({
+		const free = pickFreeModels(router.filter(model => zeroPrice(model)));
+		// Every listed free model gets a light, so the picker can mark one that is down or refused.
+		const [lights, rates] = await Promise.all([trafficByModel([...WATCHED_FREE_MODELS, ...free.map(model => model.id)]), billingRates()]);
+		const models = free.map(model => ({
 			...model, arni_provider: 'openrouter', arni_free: zeroPrice(model), arni_cache: routerCacheMode(model.id),
 			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
 			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
