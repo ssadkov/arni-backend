@@ -107,9 +107,13 @@ async function errorMessage(response: Response) {
   return body?.error?.message || 'Запрос не выполнился.';
 }
 
+/** The user's pick, else a free default. Never a paid model the user did not choose: sending stays off instead. */
 function selectedModel() {
   const stored = localStorage.getItem(MODEL_KEY);
-  return models.find(model => model.id === stored)?.id || models.find(model => model.arni_default)?.id || models[0]?.id || '';
+  return models.find(model => model.id === stored)?.id
+    || models.find(model => model.arni_default && model.arni_free === true)?.id
+    || models.find(model => model.arni_free === true)?.id
+    || '';
 }
 
 function selectedImageGenModel() {

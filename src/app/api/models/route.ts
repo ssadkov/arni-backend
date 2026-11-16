@@ -7,7 +7,7 @@ import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, managedModelMetadata
 import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/lib/llm/openRouterCatalog';
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
 import { billingRates } from '@/lib/billingCurrency';
-import { isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
+import { defaultFreeModelId, isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
 
 function outputLimit(model: RouterModel): number {
 	const limit = zeroPrice(model) ? FREE_MAX_OUTPUT_TOKENS : MANAGED_MAX_OUTPUT_TOKENS;
@@ -36,7 +36,8 @@ export async function GET(req: NextRequest) {
 				const priced = allowed.filter(model => model.inputPerMillion != null && model.outputPerMillion != null);
 				// Paid models are Bedrock only (AWS credits); a short curated list keeps the picker readable.
 				bedrock = pickBedrockModels(priced, selected).map(model => ({
-					id: model.id, name: model.name, arni_default: user.llmProvider === 'BEDROCK' && model.id === selected, arni_recommended: isRecommendedModel(model.id),
+					// Never the default: a paid model is used only when the user picks it.
+					id: model.id, name: model.name, arni_default: false, arni_recommended: isRecommendedModel(model.id),
 					arni_provider: 'bedrock', supported_parameters: ['tools'], ...managedModelMetadata(model.id),
 					pricing: { prompt: String(model.inputPerMillion! / 1_000_000), completion: String(model.outputPerMillion! / 1_000_000) },
 				}));
@@ -50,8 +51,9 @@ export async function GET(req: NextRequest) {
 		const free = pickFreeModels(router.filter(model => zeroPrice(model)));
 		// Every listed free model gets a light, so the picker can mark one that is down or refused.
 		const [lights, rates] = await Promise.all([trafficByModel([...WATCHED_FREE_MODELS, ...free.map(model => model.id)]), billingRates()]);
+		const defaultId = defaultFreeModelId(free.map(model => ({ id: model.id, light: lights.get(model.id) })));
 		const models = free.map(model => ({
-			...model, arni_provider: 'openrouter', arni_free: zeroPrice(model), arni_cache: routerCacheMode(model.id),
+			...model, arni_provider: 'openrouter', arni_free: zeroPrice(model), arni_cache: routerCacheMode(model.id), arni_default: model.id === defaultId,
 			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
 			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
 		}));
