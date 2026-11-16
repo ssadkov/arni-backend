@@ -54,6 +54,16 @@ export function pickFreeModels<T extends { id: string }>(freeModels: readonly T[
 }
 
 /**
+ * The model a new chat starts on: the first listed free model whose light is not red, else the
+ * first free one. Never a paid model, even the account's Bedrock model: starting a chat must not
+ * spend money the user did not choose to spend (2026-11-16: accounts without an explicit Bedrock
+ * model defaulted to MiniMax M2.5 in Arni Code and the web chat).
+ */
+export function defaultFreeModelId(freeModels: readonly { id: string; light?: string }[]): string | undefined {
+	return (freeModels.find(model => model.light !== 'red') ?? freeModels[0])?.id;
+}
+
+/**
  * Curated Bedrock models among those the account may use, one profile per foundation
  * model (the selected one, else `global.`), plus the selected model if it is not curated.
  */
