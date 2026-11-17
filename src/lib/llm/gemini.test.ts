@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { completeWithGemini, geminiBody, geminiModels, withToolCallIndexes } from './gemini.ts';
+import { completeWithGemini, geminiBody, geminiModels, geminiPickerAllowed, geminiPickerCatalog, parseGeminiPickerId, withToolCallIndexes } from './gemini.ts';
 
 async function read(stream: ReadableStream<Uint8Array>) {
 	return new Response(stream).text();
@@ -68,5 +68,26 @@ test('Gemini is skipped without a key and falls through refused models', async (
 		globalThis.fetch = realFetch;
 		if (savedKey === undefined) { delete process.env.GEMINI_API_KEY; } else { process.env.GEMINI_API_KEY = savedKey; }
 		if (savedModels === undefined) { delete process.env.GEMINI_FREE_MODELS; } else { process.env.GEMINI_FREE_MODELS = savedModels; }
+	}
+});
+
+test('picker ids round-trip, look like free models and are limited to named accounts', () => {
+	const savedKey = process.env.GEMINI_API_KEY;
+	const savedEmails = process.env.GEMINI_PICKER_EMAILS;
+	try {
+		process.env.GEMINI_API_KEY = 'test-key';
+		const rows = geminiPickerCatalog(4096);
+		assert.deepEqual(rows.map(row => [row.id, parseGeminiPickerId(row.id)]), [
+			['gemini/gemini-3.5-flash-lite:free', 'gemini-3.5-flash-lite'],
+			['gemini/gemini-3.1-flash-lite:free', 'gemini-3.1-flash-lite'],
+		]);
+		assert.deepEqual(['google/gemma-4-31b-it:free', 'gemini/x:free', 'gemini/gemini-3.5-flash-lite', 'gemini/../etc:free'].map(parseGeminiPickerId), [null, null, null, null]);
+		process.env.GEMINI_PICKER_EMAILS = ' A@Example.com , b@example.com ';
+		assert.deepEqual(['a@example.com', 'B@EXAMPLE.COM', 'c@example.com'].map(geminiPickerAllowed), [true, true, false]);
+		delete process.env.GEMINI_API_KEY;
+		assert.equal(geminiPickerAllowed('a@example.com'), false);
+	} finally {
+		if (savedKey === undefined) { delete process.env.GEMINI_API_KEY; } else { process.env.GEMINI_API_KEY = savedKey; }
+		if (savedEmails === undefined) { delete process.env.GEMINI_PICKER_EMAILS; } else { process.env.GEMINI_PICKER_EMAILS = savedEmails; }
 	}
 });

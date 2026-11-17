@@ -7,6 +7,7 @@ import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, managedModelMetadata
 import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/lib/llm/openRouterCatalog';
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
 import { billingRates } from '@/lib/billingCurrency';
+import { geminiPickerAllowed, geminiPickerCatalog } from '@/lib/llm/gemini';
 import { defaultFreeModelId, isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
 
 function outputLimit(model: RouterModel): number {
@@ -22,6 +23,7 @@ export async function GET(req: NextRequest) {
 	try {
 		let managed = false;
 		let bedrock: Record<string, unknown>[] = [];
+		let gemini: Record<string, unknown>[] = [];
 		const auth = req.headers.get('authorization');
 		if (auth?.startsWith('Bearer ')) {
 			let userId: string;
@@ -30,6 +32,8 @@ export async function GET(req: NextRequest) {
 			const user = await prisma.user.findUnique({ where: { id: userId }, include: { budget: true } });
 			if (!user || user.isBanned) { return NextResponse.json({ error: 'Account is blocked' }, { status: 403, headers: webCorsHeaders(req) }); }
 			managed = Boolean(user.budget);
+			// Google's free tier is offered to named accounts only (GEMINI_PICKER_EMAILS).
+			if (geminiPickerAllowed(user.email)) { gemini = geminiPickerCatalog(FREE_MAX_OUTPUT_TOKENS); }
 			if (managed) {
 				const allowed = await modelsAllowedForUser(userId);
 				const selected = await modelIdForUser(userId, user.bedrockModelId);
@@ -57,7 +61,7 @@ export async function GET(req: NextRequest) {
 			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
 			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
 		}));
-		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...bedrock, ...models] }, {
+		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...bedrock, ...models, ...gemini] }, {
 			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },
 		});
 	} catch (error) {

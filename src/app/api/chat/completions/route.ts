@@ -12,7 +12,7 @@ import {
 import { completeWithBedrock } from '@/lib/llm/bedrock';
 import { modelIdForUser } from '@/lib/llm/bedrockAccess';
 import { completeWithOpenRouter } from '@/lib/llm/openrouter';
-import { completeWithGemini } from '@/lib/llm/gemini';
+import { completeWithGemini, geminiPickerAllowed, parseGeminiPickerId } from '@/lib/llm/gemini';
 import { resolveLlmProvider } from '@/lib/llm/provider';
 import { recordModelRequest } from '@/lib/modelRequests';
 import { isModelAccessDenied, rememberRejected, rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
@@ -43,6 +43,12 @@ function freeLimitResponse(snapshot: FreeStepSnapshot) {
       'Retry-After': String(Math.max(1, Math.ceil((Date.parse(snapshot.resetsAt) - Date.now()) / 1000))),
     },
   });
+}
+
+/** The picked Gemini model only; its failure is reported as such and never rerouted to another provider. */
+async function pickedGemini(body: Record<string, unknown>, model: string): Promise<Response> {
+  const picked = await completeWithGemini(body, [model]);
+  return picked?.response ?? Response.json({ error: { code: 'gemini_unavailable', message: 'Gemini сейчас недоступна или исчерпала лимит. Выберите другую модель.' } }, { status: 503 });
 }
 
 export async function POST(req: NextRequest) {
@@ -123,8 +129,14 @@ export async function POST(req: NextRequest) {
       throw new BudgetError('invalid_model', 'Выберите модель.', 400);
     }
     const images = screenshotCount(body.messages || []);
+    // A picker id (`gemini/<model>:free`) goes straight to Google for accounts that were given it.
+    const geminiPick = typeof body.model === 'string' ? parseGeminiPickerId(body.model) : null;
+    if (geminiPick) {
+      if (!geminiPickerAllowed(user.email)) { throw new BudgetError('model_unavailable', 'Модель отсутствует в текущем каталоге. Обновите список моделей.', 400); }
+      trackedSource = usageSource = 'gemini';
+    }
     const isFreeModel = provider === 'openrouter' && typeof body.model === 'string' && body.model.endsWith(':free');
-    if (provider === 'openrouter') {
+    if (provider === 'openrouter' && !geminiPick) {
       await routerModel(body.model, images > 0);
       if (isFreeModel) { body.provider = { max_price: { prompt: 0, completion: 0, request: 0 }, require_parameters: true }; }
     }
@@ -183,7 +195,7 @@ export async function POST(req: NextRequest) {
 
     // A red :free model is sent to the next green or yellow model in picker order.
     // Bedrock and paid models are left untouched.
-    if (isFreeModel && typeof body.model === 'string') {
+    if (isFreeModel && !geminiPick && typeof body.model === 'string') {
       const candidates = (await routerCatalog()).filter(model => zeroPrice(model) && (!images || model.architecture?.input_modalities?.includes('image'))).map(model => model.id);
       const routed = await routeFreeModel(body.model, candidates);
       if (routed.routedFrom) {
@@ -207,12 +219,13 @@ export async function POST(req: NextRequest) {
     upstreamDispatched = true;
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel, catalogPrice)
+      : geminiPick ? await pickedGemini(body, geminiPick)
       : await completeWithOpenRouter(await freeRequestBody(body));
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.
     const refusedText = isFreeModel && response.status === 403 ? await response.clone().text() : '';
-    if (isFreeModel && ([429, 502, 503].includes(response.status) || isModelAccessDenied(response.status, refusedText))) {
+    if (isFreeModel && !geminiPick && ([429, 502, 503].includes(response.status) || isModelAccessDenied(response.status, refusedText))) {
       const failedModel = trackedModel;
       const errorText = await response.text();
       await track(response.status, errorText, failedModel);
