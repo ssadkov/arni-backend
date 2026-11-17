@@ -215,6 +215,51 @@ async function main() {
 		assert.equal(geminiCalls.length, 0);
 		delete process.env.GEMINI_API_KEY; routerMode = 'success';
 	});
+	await check('Gemini picker models are listed and callable only for named accounts, and never rerouted', async () => {
+		const { NextRequest } = require('next/server');
+		const email = (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).email;
+		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
+		const headers = { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+		const catalog = async () => (await (await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models', { headers }))).json()).data;
+		const post = require('../src/app/api/chat/completions/route.ts').POST;
+		const request = selected => new NextRequest('http://localhost/api/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: selected, messages: [{ role: 'user', content: 'Picker test' }], max_tokens: 50 }) });
+		const snapshot = async () => ({ steps: (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).freeStepsTotal, balance: (await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros });
+		const first = 'gemini/gemini-3.5-flash-lite:free'; const second = 'gemini/gemini-3.1-flash-lite:free';
+		routerMode = 'success'; geminiMode = 'ok'; geminiCalls.length = 0;
+
+		// Not named: invisible and uncallable, even with a key configured.
+		process.env.GEMINI_API_KEY = 'mock-only'; process.env.GEMINI_PICKER_EMAILS = 'someone-else@example.com';
+		assert.ok(!(await catalog()).some(row => row.id.startsWith('gemini/')));
+		assert.equal((await post(request(first))).status, 400);
+		assert.equal(geminiCalls.length, 0);
+
+		// Named (case-insensitive): both models are listed like free models, never as the default.
+		process.env.GEMINI_PICKER_EMAILS = ` ${email.toUpperCase()} , other@example.com`;
+		const listed = (await catalog()).filter(row => row.id.startsWith('gemini/'));
+		assert.deepEqual(listed.map(row => [row.id, row.arni_free, row.arni_default, row.pricing.prompt]), [[first, true, false, '0'], [second, true, false, '0']]);
+		let before = await snapshot(); const calls = routerCalls;
+		let result = await post(request(second));
+		assert.equal(result.status, 200); assert.equal((await result.json()).choices[0].message.content, 'from gemini');
+		assert.deepEqual([geminiCalls.map(row => row.model), routerCalls - calls], [['gemini-3.1-flash-lite'], 0]);
+		let after = await snapshot();
+		assert.deepEqual([after.steps - before.steps, after.balance - before.balance], [1, 0]);
+		const log = await prisma.usageLog.findFirstOrThrow({ where: { userId, requestedModel: second }, orderBy: { createdAt: 'desc' } });
+		assert.deepEqual([log.source, log.model, log.costMicros], ['gemini', 'gemini-3.1-flash-lite', 0]);
+
+		// The picked model is the only one tried; its failure is reported, not rerouted to OpenRouter or the other Gemini.
+		geminiMode = 'first-limited'; geminiCalls.length = 0; before = await snapshot();
+		result = await post(request(first));
+		assert.equal(result.status, 503); assert.equal((await result.json()).error.code, 'gemini_unavailable');
+		assert.deepEqual([geminiCalls.map(row => row.model), routerCalls - calls], [['gemini-3.5-flash-lite'], 0]);
+		after = await snapshot();
+		assert.deepEqual([after.steps - before.steps, after.balance - before.balance], [0, 0]);
+
+		// A key-less deployment hides them again.
+		delete process.env.GEMINI_API_KEY; geminiCalls.length = 0;
+		assert.ok(!(await catalog()).some(row => row.id.startsWith('gemini/')));
+		assert.equal((await post(request(first))).status, 400);
+		delete process.env.GEMINI_PICKER_EMAILS; geminiMode = 'ok';
+	});
 	process.env.ARNI_IMAGE_GENERATION_ENABLED = 'true';
 	await check('image catalog lists simple and text models with default Core price', async () => {
 		const catalog = imageCatalogPublic();

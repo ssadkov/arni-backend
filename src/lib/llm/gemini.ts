@@ -76,10 +76,44 @@ export function withToolCallIndexes(source: ReadableStream<Uint8Array>): Readabl
 	}));
 }
 
+/**
+ * Picker ids look like OpenRouter's free models (`gemini/<model>:free`) so the client lists them with no
+ * client change. They are offered only to accounts named in GEMINI_PICKER_EMAILS (comma-separated).
+ */
+const PICKER_PREFIX = 'gemini/';
+
+export function geminiPickerId(model: string): string {
+	return `${PICKER_PREFIX}${model}:free`;
+}
+
+/** The Gemini model behind a picker id, or null when the id is not one of ours. */
+export function parseGeminiPickerId(id: string): string | null {
+	if (!id.startsWith(PICKER_PREFIX) || !id.endsWith(':free')) { return null; }
+	const model = id.slice(PICKER_PREFIX.length, -':free'.length);
+	return /^[a-z0-9.-]{3,60}$/.test(model) ? model : null;
+}
+
+export function geminiPickerAllowed(email: string): boolean {
+	if (!process.env.GEMINI_API_KEY) { return false; }
+	return (process.env.GEMINI_PICKER_EMAILS || '').split(',').map(item => item.trim().toLowerCase()).filter(Boolean).includes(email.toLowerCase());
+}
+
+/** Catalog rows in the shape of OpenRouter's free models; the context window is deliberately conservative. */
+export function geminiPickerCatalog(maxCompletionTokens: number) {
+	return geminiModels().map(model => ({
+		id: geminiPickerId(model), name: `Google ${model.replace(/^gemini-/, 'Gemini ').replace(/-/g, ' ')} (free)`,
+		context_length: 200_000, architecture: { input_modalities: ['text', 'image'] }, supported_parameters: ['tools'],
+		pricing: { prompt: '0', completion: '0', request: '0', image: '0' },
+		top_provider: { context_length: 200_000, max_completion_tokens: maxCompletionTokens },
+		arni_provider: 'openrouter', arni_free: true, arni_default: false, arni_traffic: 'unknown', arni_recommended: false,
+	}));
+}
+
 /** First Gemini model that accepts the request, or null so the caller keeps the OpenRouter error. */
-export async function completeWithGemini(body: ChatBody): Promise<{ response: Response; model: string } | null> {
+export async function completeWithGemini(body: ChatBody, models: readonly string[] = geminiModels()): Promise<{ response: Response; model: string } | null> {
 	const key = process.env.GEMINI_API_KEY;
-	for (const model of geminiModels()) {
+	if (!key) { return null; }
+	for (const model of models) {
 		let response: Response;
 		try {
 			response = await fetch(GEMINI_ENDPOINT, {
