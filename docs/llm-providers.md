@@ -7,7 +7,7 @@
 | Переменная | Локально | Прод | Используется в коде |
 |---|---|---|---|
 | `OPENROUTER_API_KEY` | `.env` | Vercel → Settings → Environment Variables | да (`src/lib/llm/openrouter.ts`) |
-| `GEMINI_API_KEY` | `.env` (добавлен 2026-11-10) | не добавлен | **нет**, клиента Google пока нет |
+| `GEMINI_API_KEY` | `.env` (добавлен 2026-11-10) | не добавлен | да, резерв для `:free` (`src/lib/llm/gemini.ts`); необязательный `GEMINI_FREE_MODELS` — список через запятую |
 | `GROQ_API_KEY` | `.env` (добавлен 2026-11-09) | Vercel, Production (добавлен 2026-11-09) | **нет**, клиента Groq пока нет |
 | AWS / Bedrock | профиль AWS CLI | Vercel | да (`src/lib/llm/bedrock.ts`) |
 
@@ -43,7 +43,7 @@ Base URL: `https://api.groq.com/openai/v1` (OpenAI-совместимый).
 
 ## Google AI Studio (ключ есть, не подключён)
 
-Ключ: `GEMINI_API_KEY` в `.env` (добавлен 2026-11-10, проект AI Studio «Arni Code»). В коде пока не используется. OpenAI-совместимый endpoint: `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`, ключ — в заголовке `Authorization: Bearer`, не в URL.
+Ключ: `GEMINI_API_KEY` в `.env` (добавлен 2026-11-10, проект AI Studio «Arni Code»). С 2026-11-18 в коде: резерв для бесплатных запросов. Если OpenRouter ответил 429 на `:free` (в том числе из-за общего суточного лимита `free-models-per-day`) или 502/503, и другой `:free` не помог, запрос уходит в `gemini-3.5-flash-lite`, затем в `gemini-3.1-flash-lite`. В выбор моделей они не попадают; клиент видит ответившую модель в `X-Arni-Served-Model`, шаг списывается как бесплатный, в журнале `source=gemini`. Сервер добавляет `index` к потоковым tool calls (Google его не присылает) и подставляет заглушку подписи мысли для истории от других моделей. OpenAI-совместимый endpoint: `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`, ключ — в заголовке `Authorization: Bearer`, не в URL.
 
 Бесплатные лимиты проекта «Arni Code» (AI Studio → Rate Limit, 2026-11-10). Лимиты считаются на проект и отдельно на каждую модель; второй ключ в том же проекте их не увеличивает.
 
