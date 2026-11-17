@@ -51,6 +51,8 @@ function grantRequest(userId, payload, authenticated = true) {
 }
 
 async function main() {
+	// Prisma loads the developer's .env, which holds a real Gemini key; tests must never reach Google.
+	delete process.env.GEMINI_API_KEY;
 	await check('additive migration preserves existing token balance', async () => {
 		const fixture = await prisma.user.findUnique({ where: { id: 'migration-fixture' }, include: { budget: true } });
 		assert.deepEqual({ tokens: fixture?.tokenBalance, budget: fixture?.budget }, { tokens: 12345, budget: null });

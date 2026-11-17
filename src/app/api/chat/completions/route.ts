@@ -12,6 +12,7 @@ import {
 import { completeWithBedrock } from '@/lib/llm/bedrock';
 import { modelIdForUser } from '@/lib/llm/bedrockAccess';
 import { completeWithOpenRouter } from '@/lib/llm/openrouter';
+import { completeWithGemini } from '@/lib/llm/gemini';
 import { resolveLlmProvider } from '@/lib/llm/provider';
 import { recordModelRequest } from '@/lib/modelRequests';
 import { isModelAccessDenied, rememberRejected, rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
@@ -56,6 +57,8 @@ export async function POST(req: NextRequest) {
   let upstreamDispatched = false;
   let requestedModel = 'unknown';
   let trackedSource: string | undefined;
+  // Provider that actually served the answer; differs from the routed one when Gemini is the reserve.
+  let usageSource = '';
   const track = (statusCode: number, error?: string | null, model = trackedModel) => {
     if (!trackedUserId) {
       return Promise.resolve();
@@ -113,7 +116,7 @@ export async function POST(req: NextRequest) {
     const budget = await prisma.accountBudget.findUnique({ where: { userId: user.id } });
     // Explicit catalog IDs determine the route; account preference only chooses a default.
     const provider = typeof body.model === 'string' && (body.model.includes('/') || body.model.endsWith(':free')) ? 'openrouter' : resolveLlmProvider('BEDROCK');
-    trackedSource = provider;
+    trackedSource = usageSource = provider;
     requestedModel = typeof body.model === 'string' ? body.model.slice(0, 200) : 'unknown';
     body = managedBody(body as BudgetBody, true);
     if (budget && (typeof body.model !== 'string' || !body.model || body.model.length > 200)) {
@@ -214,14 +217,33 @@ export async function POST(req: NextRequest) {
       const errorText = await response.text();
       await track(response.status, errorText, failedModel);
       if (response.status === 403) { rememberRejected(failedModel); } else { rememberUnavailable(failedModel); }
-      const candidates = (await routerCatalog()).filter(model => zeroPrice(model) && (!images || model.architecture?.input_modalities?.includes('image'))).map(model => model.id);
-      const routed = await routeFreeModel(failedModel, candidates);
-      if (routed.routedFrom && routed.model !== failedModel) {
-        routedFrom = routed.routedFrom;
-        body.model = routed.model;
-        trackedModel = routed.model;
-        response = await completeWithOpenRouter(await freeRequestBody(body));
-      } else {
+      // The daily :free cap belongs to the whole OpenRouter account: another :free model would be refused too.
+      const dailyCap = response.status === 429 && errorText.includes('free-models-per-day');
+      let hopped = false;
+      if (!dailyCap) {
+        const candidates = (await routerCatalog()).filter(model => zeroPrice(model) && (!images || model.architecture?.input_modalities?.includes('image'))).map(model => model.id);
+        const routed = await routeFreeModel(failedModel, candidates);
+        if (routed.routedFrom && routed.model !== failedModel) {
+          routedFrom = routed.routedFrom;
+          body.model = routed.model;
+          trackedModel = routed.model;
+          response = await completeWithOpenRouter(await freeRequestBody(body));
+          hopped = true;
+        }
+      }
+      // Google's free tier is the reserve when OpenRouter has nothing left to try.
+      let recovered = false;
+      if (!hopped || [429, 502, 503].includes(response.status)) {
+        const reserve = await completeWithGemini(body);
+        if (reserve) {
+          routedFrom = routedFrom ?? failedModel;
+          trackedModel = reserve.model;
+          trackedSource = usageSource = 'gemini';
+          response = reserve.response;
+          recovered = true;
+        }
+      }
+      if (!hopped && !recovered) {
         if (budgetReservationId) { await settleBudget(budgetReservationId, null); }
         if (reservedUserId) {
           freeSteps = await releaseFreeStep(reservedUserId);
@@ -272,7 +294,7 @@ export async function POST(req: NextRequest) {
       const input = catalogPrice?.inputPerMillion; const output = catalogPrice?.outputPerMillion;
       const measuredCost = isFreeModel ? 0 : provider === 'openrouter' && usage.cost !== undefined ? Math.ceil(usage.cost * 1_000_000)
         : input != null && output != null ? usageCostMicros(usage, input, output, input * (modelCapabilities(servedModel).cache?.readMultiplier ?? 1), input * (modelCapabilities(servedModel).cache?.writeMultiplier ?? 1)) : null;
-      const data = { userId: user.id, chatId, cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0, cacheWriteTokens: usage.prompt_tokens_details?.cache_creation_input_tokens || 0, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: provider,
+      const data = { userId: user.id, chatId, cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0, cacheWriteTokens: usage.prompt_tokens_details?.cache_creation_input_tokens || 0, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: usageSource,
         imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : null,
         inputPerMillion: input, outputPerMillion: output, costMicros: measuredCost,
         accounting: isFreeModel ? missingUsage ? 'estimated' : 'reported' : 'legacy', costBasis: measuredCost == null ? null : isFreeModel ? 'catalog' : provider === 'openrouter' ? 'provider' : 'catalog' };
