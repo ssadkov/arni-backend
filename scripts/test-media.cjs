@@ -4,10 +4,18 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 const ts = require('typescript');
-let routerCalls = 0, routerBody, routerMode = 'success';
+let routerCalls = 0, routerBody, routerMode = 'success', geminiMode = 'ok';
+const geminiCalls = [];
 global.fetch = async (url, options) => {
+	if (String(url).includes('generativelanguage.googleapis.com')) {
+		const sent = JSON.parse(options.body); geminiCalls.push(sent);
+		if (geminiMode === 'down') { return new Response('unavailable', { status: 503 }); }
+		if (geminiMode === 'first-limited' && sent.model === 'gemini-3.5-flash-lite') { return new Response('quota', { status: 429 }); }
+		return Response.json({ choices: [{ message: { role: 'assistant', content: 'from gemini' } }], usage: { prompt_tokens: 50, completion_tokens: 5 } });
+	}
 	if (String(url).includes('/chat/completions')) {
 		routerCalls++; routerBody = JSON.parse(options.body);
+		if (routerMode === 'daily-cap' && routerBody.model.endsWith(':free')) { return Response.json({ error: { message: 'Rate limit exceeded: free-models-per-day-high-balance. ', code: 429 } }, { status: 429 }); }
 		if (routerMode === 'limited' && routerBody.model === 'test/vision:free') { return Response.json({ error: 'shared pool busy' }, { status: 429 }); }
 		return Response.json({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, cost: routerBody.model.endsWith(':free') ? 0 : 0.00005 } });
 	}
@@ -46,6 +54,8 @@ const TEXT_IMAGE_PRICE = IMAGE_MODELS.find(row => row.purpose === 'text').costMi
 let userId, passed = 0;
 const check = async (name, run) => { await run(); console.log(`PASS ${name}`); passed++; };
 async function main() {
+	// Prisma loads the developer's .env, which holds a real Gemini key; only the new check enables a mock one.
+	delete process.env.GEMINI_API_KEY;
 	process.env.OPENROUTER_API_KEY = 'mock-only';
 	process.env.AWS_BEARER_TOKEN_BEDROCK = 'mock-only';
 	process.env.AWS_BEARER_TOKEN_BEDROCK_IMAGES = 'mock-images-only';
@@ -63,7 +73,7 @@ async function main() {
 		const headers = { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' };
 		const list = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models', { headers }));
 		const catalog = await list.json(); assert.equal(catalog.arni_managed, true);
-		assert.ok(catalog.data.some(row => row.id === second)); assert.equal(catalog.data.find(row => row.id === model).arni_default, true);
+		assert.ok(catalog.data.some(row => row.id === second)); assert.equal(catalog.data.find(row => row.id === model).arni_default, false, 'a paid model is never the default (6ee6f06)');
 		const post = require('../src/app/api/chat/completions/route.ts').POST;
 		const request = selected => new NextRequest('http://localhost/api/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: selected, messages: [{ role: 'user', content: 'Test selection' }], max_tokens: 50 }) });
 		const result = await post(request(second)); assert.equal(result.status, 200); await result.json();
@@ -155,6 +165,55 @@ async function main() {
 		await settleBudget(reservation.id, { prompt_tokens: 10, completion_tokens: 5 }, false, 'healthy:free');
 		const log = await prisma.usageLog.findUniqueOrThrow({ where: { requestId: id } });
 		assert.deepEqual([log.model, log.requestedModel, log.costMicros], ['healthy:free', 'first:free', 0]);
+	});
+	await check('Gemini is the free reserve when OpenRouter refuses :free; paid money and other routes are untouched', async () => {
+		const { NextRequest } = require('next/server');
+		const jwt = await require('../src/lib/jwt.ts').encryptJWT({ userId });
+		const headers = { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' };
+		const post = require('../src/app/api/chat/completions/route.ts').POST;
+		const request = (selected, extra = {}) => new NextRequest('http://localhost/api/chat/completions', { method: 'POST', headers, body: JSON.stringify({ model: selected, messages: [{ role: 'user', content: 'Reserve test' }], max_tokens: 50, provider: { max_price: 0 }, reasoning: { enabled: false }, ...extra }) });
+		const snapshot = async () => ({ steps: (await prisma.user.findUniqueOrThrow({ where: { id: userId } })).freeStepsTotal, balance: (await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros });
+		process.env.GEMINI_API_KEY = 'mock-only';
+		routerMode = 'daily-cap'; geminiMode = 'ok';
+
+		// Account-wide daily cap: no pointless hop to another :free model, Gemini answers.
+		let before = await snapshot(); const calls = routerCalls; geminiCalls.length = 0;
+		let result = await post(request('test/text:free'));
+		assert.equal(result.status, 200);
+		assert.equal((await result.json()).choices[0].message.content, 'from gemini');
+		assert.deepEqual([result.headers.get('X-Arni-Served-Model'), Boolean(result.headers.get('X-Arni-Routed-From')), routerCalls - calls, geminiCalls.length], ['gemini-3.5-flash-lite', true, 1, 1]);
+		assert.deepEqual(Object.keys(geminiCalls[0]).sort(), ['max_tokens', 'messages', 'model', 'stream', 'stream_options']);
+		let after = await snapshot();
+		assert.deepEqual([after.steps - before.steps, after.balance - before.balance], [1, 0]);
+		const log = await prisma.usageLog.findFirstOrThrow({ where: { userId, model: 'gemini-3.5-flash-lite' }, orderBy: { createdAt: 'desc' } });
+		assert.deepEqual([log.source, log.costMicros, log.accounting, log.requestedModel, log.promptTokens], ['gemini', 0, 'reported', 'test/text:free', 50]);
+		const attempts = await prisma.modelRequest.findMany({ where: { userId, requestedModel: 'test/text:free', source: 'openrouter', statusCode: 429 } });
+		assert.ok(attempts.length >= 1, 'the refused OpenRouter attempt is still recorded');
+
+		// First Gemini model out of quota: the second one answers.
+		geminiMode = 'first-limited'; geminiCalls.length = 0;
+		result = await post(request('test/vision:free'));
+		assert.equal(result.status, 200); await result.json();
+		assert.deepEqual([result.headers.get('X-Arni-Served-Model'), geminiCalls.map(row => row.model)], ['gemini-3.1-flash-lite', ['gemini-3.5-flash-lite', 'gemini-3.1-flash-lite']]);
+
+		// Gemini down too: the user gets OpenRouter's original refusal and the free step is returned.
+		geminiMode = 'down'; before = await snapshot();
+		result = await post(request('test:free'));
+		assert.equal(result.status, 429);
+		assert.match(await result.text(), /free-models-per-day/);
+		after = await snapshot();
+		assert.deepEqual([after.steps - before.steps, after.balance - before.balance], [0, 0]);
+
+		// No key: behaviour is exactly the old one and Google is never called.
+		delete process.env.GEMINI_API_KEY; geminiMode = 'ok'; geminiCalls.length = 0;
+		result = await post(request('test/text:free'));
+		assert.deepEqual([result.status, geminiCalls.length], [429, 0]);
+
+		// Paid models never fall back to Gemini.
+		process.env.GEMINI_API_KEY = 'mock-only'; geminiCalls.length = 0;
+		assert.equal((await post(request('test/paid'))).status, 403);
+		assert.equal(geminiCalls.length, 0);
+		delete process.env.GEMINI_API_KEY; routerMode = 'success';
 	});
 	process.env.ARNI_IMAGE_GENERATION_ENABLED = 'true';
 	await check('image catalog lists simple and text models with default Core price', async () => {
