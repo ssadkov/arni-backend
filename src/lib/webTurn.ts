@@ -122,6 +122,15 @@ function finalAnswerMessages(messages: ChatMessage[]): ChatMessage[] {
 	});
 }
 
+/**
+ * Without this the free models answer news questions from memory ("I have no access to fresh news"),
+ * because tool_choice is only 'auto'. Sent with the tool-enabled calls, dropped from the final no-tool answer.
+ */
+const SEARCH_GUIDANCE: ChatMessage = {
+	role: 'system',
+	content: 'You can call the web_search tool. For news, current events, prices, weather, sports results, recent releases or anything that may have changed after your training data, call web_search first and answer from its results. Never say that you cannot access news or the internet. Reply in the same language as the question and say which sources you relied on.',
+};
+
 async function modelMessages(userId: string, chatId: string, memory: string) {
 	const history = await prisma.webMessage.findMany({
 		where: { chatId },
@@ -207,6 +216,7 @@ export async function runTurn(token: string, userId: string, chatId: string, mod
 	let settledText: string | null = null;
 	if (searchConfigured()) {
 		let used = 0;
+		messages.unshift(SEARCH_GUIDANCE);
 		while (used < SEARCH_LIMIT) {
 			const response = await callModel(token, chatId, { model, messages, tools: [SEARCH_TOOL], tool_choice: 'auto', stream: false });
 			const payload = await response.json().catch(() => null);
@@ -234,7 +244,7 @@ export async function runTurn(token: string, userId: string, chatId: string, mod
 		await saveAssistant(chatId, settledText, 'complete', sources);
 		return { text: settledText, sources };
 	}
-	const upstream = await callModel(token, chatId, { model, messages: finalAnswerMessages(messages), stream: true });
+	const upstream = await callModel(token, chatId, { model, messages: finalAnswerMessages(messages.filter(message => message !== SEARCH_GUIDANCE)), stream: true });
 	if (!upstream.ok || !upstream.body) {
 		const payload = await upstream.json().catch(() => null);
 		return { error: payload || { error: { message: 'Не удалось получить ответ.' } }, status: upstream.status };

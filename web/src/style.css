@@ -196,6 +196,9 @@ button.primary:hover:not(:disabled), .actions a.primary:hover { opacity: 0.8; }
   resize: none;
 }
 .composer textarea::placeholder { color: var(--muted); }
+/* The card shows focus; the global outline would draw a second, black box inside it. */
+.composer textarea:focus-visible { outline: 0; }
+.composer:focus-within { border-color: var(--ink); }
 .composer-tools { display: flex; align-items: center; gap: 0.5rem; }
 .send-button { margin-left: auto; }
 .add-tools { position: relative; }
