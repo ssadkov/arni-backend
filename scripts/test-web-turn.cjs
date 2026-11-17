@@ -83,6 +83,19 @@ async function main() {
 			assert.ok(final.messages.some(message => message.content.includes('author one')));
 		});
 	}
+	await check('tool calls carry a search instruction that the final no-tool answer drops; disabled search never sees it', async () => {
+		responses = [searchResponse(['one', 'two'])];
+		const result = await runTurn('mock-token', 'user', 'chat', model);
+		await new Response(result.stream).text();
+		const [first, final] = calls;
+		assert.equal(first.messages[0].role, 'system');
+		assert.match(first.messages[0].content, /web_search/);
+		assert.match(first.messages[0].content, /Never say that you cannot access news/);
+		assert.ok(final.messages.every(message => message.role !== 'system'), 'the no-tool answer must not be told to call a tool');
+		reset(); configured = false;
+		await new Response((await runTurn('mock-token', 'user', 'chat', model)).stream).text();
+		assert.ok(calls[0].messages.every(message => message.role !== 'system'));
+	});
 	await check('an answer before the search cap is saved with its sources', async () => {
 		responses = [searchResponse(['one']), { choices: [{ message: { content: 'An answer with sources.' } }] }];
 		const result = await runTurn('mock-token', 'user', 'chat', model);
