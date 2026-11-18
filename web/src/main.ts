@@ -60,8 +60,12 @@ let imageGenEnabled: boolean | null = null;
 let imageGenDefault = '';
 let sending = false;
 let opening = false;
+let chatListRequest = 0;
+let chatsLoading = false;
+let chatsError = false;
 let modelsLoading = false;
 let modelsError = false;
+const narrowScreen = matchMedia('(max-width: 800px)');
 
 const icons = {
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
@@ -73,6 +77,8 @@ const icons = {
   spark: '<path d="M12 3c0 5-4 9-9 9 5 0 9 4 9 9 0-5 4-9 9-9-5 0-9-4-9-9Z"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
+  search: '<circle cx="10.5" cy="10.5" r="5.5"/><path d="m15 15 5 5"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
 };
 
 function icon(name: keyof typeof icons) {
@@ -200,8 +206,8 @@ async function enterApp() {
   if (!token) {
     return;
   }
-  await refreshChats();
   renderApp();
+  void refreshChats();
   void refreshModels();
   void refreshImageConfig();
 }
@@ -240,36 +246,69 @@ function limitsHtml() {
   </dl></div>`;
 }
 
+function accountSummary() {
+  if (!account) {
+    return '';
+  }
+  const { budget, freeSteps } = account;
+  if (budget?.enabled && !budget.expired) {
+    return `Баланс ${usd(Math.max(0, budget.balanceMicros))}`;
+  }
+  return freeSteps ? `Бесплатные шаги · ${freeSteps.remaining} из ${freeSteps.limit}` : '';
+}
+
 function setChatsOpen(open: boolean) {
-  document.querySelector('#sidebar')?.classList.toggle('open', open);
+  const sidebar = document.querySelector('#sidebar');
+  const trigger = document.querySelector<HTMLButtonElement>('#show-chats');
+  const main = document.querySelector<HTMLElement>('.main');
+  if (!sidebar || !trigger || !main) {
+    return;
+  }
+  const wasOpen = sidebar.classList.contains('open');
+  sidebar.classList.toggle('open', open);
   document.querySelector('#backdrop')?.classList.toggle('open', open);
-  document.querySelector('#show-chats')?.setAttribute('aria-expanded', String(open));
+  trigger.setAttribute('aria-expanded', String(open));
+  main.inert = open;
+  if (open) {
+    document.querySelector<HTMLButtonElement>('#hide-chats')?.focus();
+  } else if (wasOpen && narrowScreen.matches) {
+    trigger.focus();
+  }
 }
 
 function renderApp() {
   app!.innerHTML = `<div class="shell">
     <div class="workspace">
       <aside class="sidebar" id="sidebar">
-        <strong class="brand">Arni</strong>
-        <button id="new-chat" class="new-chat" type="button">${icon('compose')} Новый чат</button>
+        <div class="sidebar-header">
+          <strong class="brand">arni</strong>
+          <button id="hide-chats" class="icon-button menu" type="button" aria-label="Закрыть список чатов">${icon('close')}</button>
+        </div>
+        <button id="new-chat" class="primary new-chat" type="button">${icon('compose')} Новый чат</button>
         <nav class="history" aria-label="История чатов">
-          <h2>Ваши чаты</h2>
+          <label class="chat-search" for="chat-search">
+            ${icon('search')}<span class="sr-only">Поиск чатов по названию</span>
+            <input type="search" id="chat-search" placeholder="Поиск чатов" aria-controls="chat-list" autocomplete="off" />
+          </label>
           <div class="chats" id="chat-list"></div>
         </nav>
-        <button id="show-account" class="account-button" type="button">
-          <span class="avatar" aria-hidden="true">${escapeHtml(account?.email?.charAt(0).toUpperCase() || 'A')}</span>
-          <span class="account-name">${escapeHtml(account?.email || 'Аккаунт')}</span>${icon('chevron')}
+        <button id="show-account" class="account-button" type="button" aria-haspopup="dialog">
+          <span class="account-details">
+            <span class="account-name">${escapeHtml(account?.email || 'Аккаунт')}</span>
+            <span class="account-summary" id="account-summary">${escapeHtml(accountSummary())}</span>
+          </span>${icon('chevron')}
         </button>
       </aside>
       <button id="backdrop" class="backdrop" type="button" tabindex="-1" aria-label="Закрыть список чатов"></button>
       <main class="main">
         <header class="topbar">
-          <button id="show-chats" class="icon-button menu" type="button" aria-label="Чаты" aria-controls="sidebar" aria-expanded="false">${icon('menu')}</button>
-          <button id="show-models" class="model-trigger" type="button" aria-haspopup="dialog">
-            <span id="current-model">Модель</span>${icon('chevron')}
-          </button>
+          <div class="topbar-inner">
+            <button id="show-chats" class="icon-button menu" type="button" aria-label="Чаты" aria-controls="sidebar" aria-expanded="false">${icon('menu')}</button>
+            <div id="chat-title" class="chat-title" role="heading" aria-level="1" tabindex="-1">Новый чат</div>
+          </div>
         </header>
         <div class="conversation" id="conversation">
+          <p id="copy-status" class="sr-only" role="status"></p>
           <div class="thread" id="thread" aria-label="Сообщения"></div>
           <form class="composer" id="composer">
             <div id="attachment" class="attachment" hidden>
@@ -278,7 +317,7 @@ function renderApp() {
               <button id="remove-file" class="icon-button" type="button" aria-label="Убрать изображение">${icon('close')}</button>
             </div>
             <label class="sr-only" for="input">Сообщение</label>
-            <textarea id="input" placeholder="Спросите что угодно" rows="1" maxlength="16000"></textarea>
+            <textarea id="input" placeholder="Напишите сообщение…" rows="1" maxlength="16000"></textarea>
             <div class="composer-tools">
               <div class="add-tools">
                 <button id="show-tools" class="icon-button add-button" type="button" aria-label="Добавить" aria-controls="tool-panel" aria-expanded="false">${icon('plus')}</button>
@@ -288,8 +327,11 @@ function renderApp() {
                 </div>
                 <input id="file" type="file" accept="image/png,image/jpeg" hidden />
               </div>
+              <button id="show-models" class="model-trigger" type="button" aria-haspopup="dialog" aria-label="Выбрать модель">
+                <span id="current-model">Выбрать модель</span>${icon('chevron')}
+              </button>
               <button id="image-mode" class="mode-button" type="button" aria-label="Выйти из режима создания изображения" hidden>${icon('spark')} Изображение ${icon('close')}</button>
-              <button id="send" class="primary icon-button send-button" type="submit" aria-label="Отправить">${icon('send')}</button>
+              <button id="send" class="primary send-button" type="submit" aria-label="Отправить">${icon('send')}<span>Отправить</span></button>
             </div>
             <div id="image-gen-picker" class="image-gen-picker" hidden>
               <p class="image-gen-hint muted">Выберите тип картинки. Описание лучше на английском — русский Stability сейчас отклоняет. Сервер не угадывает модель сам.</p>
@@ -343,8 +385,11 @@ function renderApp() {
   document.querySelector('#show-account')?.addEventListener('click', () => document.querySelector<HTMLDialogElement>('#account-dialog')?.showModal());
   document.querySelector('#show-memory')?.addEventListener('click', () => void openMemory());
   document.querySelector('#save-memory')?.addEventListener('click', () => void saveMemory());
-  document.querySelector('#show-chats')?.addEventListener('click', () => setChatsOpen(!document.querySelector('#sidebar')?.classList.contains('open')));
+  document.querySelector('#show-chats')?.addEventListener('click', () => setChatsOpen(true));
+  document.querySelector('#hide-chats')?.addEventListener('click', () => setChatsOpen(false));
   document.querySelector('#backdrop')?.addEventListener('click', () => setChatsOpen(false));
+  document.querySelector('#chat-search')?.addEventListener('input', paintChats);
+  document.querySelector('#thread')?.addEventListener('click', event => void copyMessage(event));
   document.querySelector<HTMLFormElement>('#composer')?.addEventListener('submit', event => {
     event.preventDefault();
     void send(imageMode);
@@ -390,12 +435,11 @@ function renderApp() {
     }
   });
   document.querySelector('.shell')?.addEventListener('keydown', event => {
-    if ((event as KeyboardEvent).key === 'Escape') {
+    if ((event as KeyboardEvent).key === 'Escape' && !document.querySelector('dialog[open]')) {
       if (!document.querySelector<HTMLElement>('#tool-panel')?.hidden) {
         setToolsOpen(false, true);
       } else if (document.querySelector('#sidebar')?.classList.contains('open')) {
         setChatsOpen(false);
-        document.querySelector<HTMLButtonElement>('#show-chats')?.focus();
       }
     }
   });
@@ -431,6 +475,10 @@ function paintLimits() {
   if (limits) {
     limits.innerHTML = limitsHtml();
   }
+  const summary = document.querySelector('#account-summary');
+  if (summary) {
+    summary.textContent = accountSummary();
+  }
 }
 
 async function openMemory() {
@@ -447,13 +495,30 @@ async function openMemory() {
 
 function paintChats() {
   const list = document.querySelector('#chat-list');
-  if (!list) {
+  const heading = document.querySelector<HTMLElement>('#chat-title');
+  if (!list || !heading) {
     return;
   }
-  list.innerHTML = chats.length
-    ? chats.map(chat => `<button type="button" data-id="${escapeHtml(chat.id)}" ${chat.id === activeId ? 'aria-current="true"' : ''} ${sending || opening ? 'disabled' : ''}>${escapeHtml(chat.title || 'Новый чат')}</button>`).join('')
-    : '<p class="muted empty">Пока нет чатов</p>';
-  list.querySelectorAll('button').forEach(button => button.addEventListener('click', () => void openChat(button.dataset.id || '')));
+  heading.textContent = chats.find(chat => chat.id === activeId)?.title || 'Новый чат';
+  heading.title = heading.textContent;
+  const query = document.querySelector<HTMLInputElement>('#chat-search')!.value.trim().toLocaleLowerCase('ru');
+  const matching = chats.filter(chat => (chat.title || 'Новый чат').toLocaleLowerCase('ru').includes(query));
+  const rows = matching.map(chat => {
+    const title = escapeHtml(chat.title || 'Новый чат');
+    return `<button class="chat-row" type="button" title="${title}" data-id="${escapeHtml(chat.id)}" ${chat.id === activeId ? 'aria-current="true"' : ''} ${sending || opening ? 'disabled' : ''}>${title}</button>`;
+  }).join('');
+  let status = '';
+  if (chatsError) {
+    status = '<div class="empty"><p class="error" role="status">Не удалось обновить список чатов.</p><button id="retry-chats" type="button">Повторить</button></div>';
+  } else if (!rows) {
+    status = `<p class="muted empty" role="status">${chatsLoading ? 'Загружаем чаты…' : query ? 'Чаты не найдены' : 'Пока нет чатов'}</p>`;
+  }
+  list.innerHTML = rows + status;
+  list.querySelectorAll<HTMLButtonElement>('[data-id]').forEach(button => button.addEventListener('click', () => void openChat(button.dataset.id!)));
+  list.querySelector('#retry-chats')?.addEventListener('click', () => {
+    document.querySelector<HTMLInputElement>('#chat-search')?.focus();
+    void refreshChats();
+  });
 }
 
 function paintModels() {
@@ -465,6 +530,9 @@ function paintModels() {
   const current = selectedModel();
   const chosen = models.find(model => model.id === current);
   label.textContent = chosen ? chosen.name || chosen.id : 'Выбрать модель';
+  const trigger = document.querySelector<HTMLButtonElement>('#show-models')!;
+  trigger.title = label.textContent;
+  trigger.setAttribute('aria-label', chosen ? `Выбрать модель. Сейчас выбрана ${label.textContent}` : 'Выбрать модель');
   if (modelsLoading || modelsError) {
     list.innerHTML = modelsLoading
       ? '<p class="model-state muted" role="status">Загружаем модели…</p>'
@@ -549,7 +617,7 @@ function paintImageGenModels() {
 
 function paintComposer() {
   const input = document.querySelector<HTMLTextAreaElement>('#input')!;
-  input.placeholder = imageMode ? 'Опишите изображение' : 'Спросите что угодно';
+  input.placeholder = imageMode ? 'Опишите изображение' : 'Напишите сообщение…';
   input.style.height = 'auto';
   input.style.height = `${input.scrollHeight}px`;
   input.readOnly = sending || opening;
@@ -558,7 +626,9 @@ function paintComposer() {
   document.querySelector<HTMLElement>('#attachment')!.hidden = !pendingImage || imageMode;
   document.querySelector<HTMLButtonElement>('#remove-file')!.disabled = sending || opening;
   document.querySelector<HTMLButtonElement>('#show-tools')!.disabled = sending || opening;
-  document.querySelector<HTMLButtonElement>('#show-models')!.disabled = sending;
+  const modelTrigger = document.querySelector<HTMLButtonElement>('#show-models')!;
+  modelTrigger.hidden = imageMode;
+  modelTrigger.disabled = sending;
   document.querySelector<HTMLButtonElement>('#new-chat')!.disabled = sending || opening;
   document.querySelector<HTMLButtonElement>('#sign-out')!.disabled = sending || opening;
   paintImageGenModels();
@@ -579,19 +649,46 @@ function paintMessages() {
     return;
   }
   if (!messages.length) {
-    thread.innerHTML = sending ? '' : '<div class="empty-thread"><h1>Чем помочь?</h1><p class="muted">Задайте вопрос или добавьте изображение через «+».</p></div>';
+    thread.innerHTML = sending ? '' : '<div class="empty-thread"><h2>Чем помочь?</h2></div>';
     return;
   }
-  thread.innerHTML = messages.map(message => {
-    const images = message.images.map(image => `<img data-image="${escapeHtml(image.id)}" alt="${message.role === 'user' ? 'Прикреплённое изображение' : 'Изображение от Арни'}" />`).join('');
+  thread.innerHTML = messages.map((message, index) => {
+    const user = message.role === 'user';
+    const author = user ? 'Вы' : 'Arni';
+    const images = message.images.map(image => `<img data-image="${escapeHtml(image.id)}" alt="${user ? 'Прикреплённое изображение' : 'Изображение от Арни'}" />`).join('');
     const links = message.sources?.filter(hit => /^https?:\/\//i.test(hit.url));
     const sources = links?.length ? `<ol class="sources">${links.map(hit => `<li><a href="${escapeHtml(hit.url)}" target="_blank" rel="noreferrer">${escapeHtml(hit.title)}</a></li>`).join('')}</ol>` : '';
-    return `<article class="bubble ${message.role === 'user' ? 'user' : ''}" aria-label="${message.role === 'user' ? 'Вы' : 'Арни'}"><div class="message-text">${renderMarkdown(message.text)}</div>${images}${sources}${message.status === 'incomplete' ? '<p class="muted">Ответ оборвался.</p>' : ''}</article>`;
+    const copy = message.text ? `<button class="icon-button copy-button" type="button" data-copy-index="${index}" aria-label="Копировать сообщение" title="Копировать сообщение">${icon('copy')}</button>` : '';
+    return `<article class="bubble${user ? ' user' : ''}" aria-labelledby="message-author-${index}">
+      <div class="message-header"><span id="message-author-${index}">${author}</span>${copy}</div>
+      <div class="message-text">${renderMarkdown(message.text)}</div>
+      ${images}${sources}${message.status === 'incomplete' ? '<p class="muted">Ответ оборвался.</p>' : ''}
+    </article>`;
   }).join('');
   thread.querySelectorAll<HTMLImageElement>('img[data-image]').forEach(image => {
     void loadImage(image);
   });
   thread.scrollTop = thread.scrollHeight;
+}
+
+async function copyMessage(event: Event) {
+  const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-copy-index]') : null;
+  const message = button && messages[Number(button.dataset.copyIndex)];
+  if (!button || !message?.text) {
+    return;
+  }
+  const status = document.querySelector('#copy-status')!;
+  status.textContent = '';
+  try {
+    await navigator.clipboard.writeText(message.text);
+    status.textContent = 'Сообщение скопировано.';
+    button.innerHTML = icon('check');
+    window.setTimeout(() => { button.innerHTML = icon('copy'); }, 1500);
+  } catch {
+    if (button.isConnected) {
+      setStatus('Не удалось скопировать сообщение. Выделите и скопируйте текст вручную.', true);
+    }
+  }
 }
 
 async function loadImage(image: HTMLImageElement) {
@@ -640,12 +737,29 @@ async function refreshModels() {
 }
 
 async function refreshChats() {
-  const response = await api('/api/web/chats');
-  if (!response.ok) {
-    return;
+  const request = ++chatListRequest;
+  chatsLoading = true;
+  chatsError = false;
+  paintChats();
+  try {
+    const response = await api('/api/web/chats');
+    if (!response.ok) {
+      throw new Error('Chat list unavailable');
+    }
+    const body = await response.json() as { chats: Chat[] };
+    if (request === chatListRequest) {
+      chats = body.chats;
+    }
+  } catch {
+    if (request === chatListRequest) {
+      chatsError = true;
+    }
+  } finally {
+    if (request === chatListRequest) {
+      chatsLoading = false;
+      paintChats();
+    }
   }
-  const body = await response.json() as { chats: Chat[] };
-  chats = body.chats;
 }
 
 async function openChat(id: string) {
@@ -669,6 +783,9 @@ async function openChat(id: string) {
     paintChats();
     paintMessages();
     paintComposer();
+    if (document.activeElement === document.body) {
+      document.querySelector<HTMLElement>('#chat-title')?.focus();
+    }
   }
 }
 
@@ -858,10 +975,8 @@ async function send(draw: boolean) {
     paintMessages();
     paintComposer();
     paintChats();
-    void Promise.allSettled([refreshChats(), refreshAccount()]).then(() => {
-      paintChats();
-      paintLimits();
-    });
+    void refreshChats();
+    void refreshAccount().then(paintLimits).catch(() => undefined);
   }
 }
 
@@ -913,9 +1028,14 @@ async function streamReply(body: ReadableStream<Uint8Array>, text: string, image
 
 function signOut() {
   clearAttachment();
+  chatListRequest++;
+  chats = [];
+  chatsLoading = false;
+  chatsError = false;
   token = '';
   localStorage.removeItem(TOKEN_KEY);
   renderGate('');
 }
 
+narrowScreen.addEventListener('change', () => setChatsOpen(false));
 void boot().catch(() => renderGate('Не удалось подключиться к Arni. Обновите страницу и попробуйте снова.'));
