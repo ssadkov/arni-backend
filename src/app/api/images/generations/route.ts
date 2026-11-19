@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
 		} catch {
 			throw new BudgetError('invalid_json', 'Некорректный JSON.', 400);
 		}
-		return NextResponse.json(await generateImage(user.id, req.headers.get('idempotency-key') || '', body, chatIdHeader(req.headers)), {
+		return NextResponse.json(await generateImage(user.id, req.headers.get('idempotency-key') || '', body, chatIdHeader(req.headers), req.headers.get('x-arni-client')), {
 			headers: { 'Cache-Control': 'private, no-store' },
 		});
 	} catch (error) {

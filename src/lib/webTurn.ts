@@ -87,6 +87,7 @@ async function callModel(token: string, chatId: string, body: Record<string, unk
 			Authorization: `Bearer ${token}`,
 			'Content-Type': 'application/json',
 			'X-Arni-Chat-Id': chatId,
+			'X-Arni-Client': 'web',
 		},
 		body: JSON.stringify(body),
 	}));
@@ -300,7 +301,7 @@ export async function generateChatImage(
 		prompt: trimmed,
 		aspect_ratio: aspectRatio || '1:1',
 		...(model ? { model } : {}),
-	});
+	}, chatId, 'web');
 	const stored = await prisma.mediaGeneration.findFirst({ where: { id: generated.id, userId, status: 'succeeded' } });
 	if (!stored?.image) {
 		throw new BudgetError('image_failed', 'Картинка не сохранилась.', 502);

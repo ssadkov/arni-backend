@@ -48,6 +48,16 @@ const TRAFFIC_LABEL: Record<TrafficLight, string> = {
 	unknown: 'Unknown',
 };
 
+function clientLabel(value: string | null): string {
+	switch (value) {
+		case 'web': return 'Web';
+		case 'arni': return 'Arni';
+		case 'arni-code': return 'Arni Code';
+		case 'unknown': return 'Unspecified';
+		default: return 'Earlier';
+	}
+}
+
 function shortModelName(model: string): string {
 	const slug = model.split('/').pop() ?? model;
 	return slug.replace(/:free$/, '');
@@ -88,7 +98,7 @@ export default async function ModelsPage({
 	const since7d = new Date(Date.now() - 7 * DAY_MS);
 	let dbError = false;
 
-	const [key, attempts, completions, recent] = await Promise.all([
+	const [key, attempts, completions, recent, clients, clientSpend] = await Promise.all([
 		fetchOpenRouterKeyStatus(),
 		prisma.modelRequest.groupBy({
 			by: ['model', 'statusCode'],
@@ -110,6 +120,23 @@ export default async function ModelsPage({
 			orderBy: { createdAt: 'desc' },
 			take: 40,
 			include: { user: { select: { email: true } } },
+		}).catch(() => {
+			dbError = true;
+			return [];
+		}),
+		prisma.modelRequest.groupBy({
+			by: ['client'],
+			where: { createdAt: { gte: since7d } },
+			_count: { _all: true },
+		}).catch(() => {
+			dbError = true;
+			return [];
+		}),
+		prisma.usageLog.groupBy({
+			by: ['client'],
+			where: { createdAt: { gte: since7d } },
+			_count: { _all: true },
+			_sum: { costMicros: true },
 		}).catch(() => {
 			dbError = true;
 			return [];
@@ -150,6 +177,16 @@ export default async function ModelsPage({
 		ensure(row.model).completions7d = row._count._all;
 	}
 
+	const requestCount = new Map(clients.map(row => [row.client, row._count._all]));
+	const spendByClient = new Map(clientSpend.map(row => [row.client, { count: row._count._all, micros: row._sum.costMicros ?? 0 }]));
+	const clientRows = (['web', 'arni', 'arni-code', 'unknown', null] as const)
+		.map(name => ({
+			name,
+			requests: requestCount.get(name) ?? 0,
+			completions: spendByClient.get(name)?.count ?? 0,
+			micros: spendByClient.get(name)?.micros ?? 0,
+		}))
+		.filter(row => row.requests > 0 || row.completions > 0 || row.micros !== 0);
 	const rows = [...stats.values()].sort((a, b) => (b.requests24h + b.completions7d) - (a.requests24h + a.completions7d));
 	const watched = [...new Set<string>([...WATCHED_FREE_MODELS, ...rows.map(row => row.model)])]
 		.filter(model => model.includes('/'))
@@ -245,6 +282,24 @@ export default async function ModelsPage({
 					</p>
 				</div>
 			</div>
+
+			<section className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
+				<h3 className="text-lg font-semibold text-gray-800">Clients, 7 days</h3>
+				<p className="text-sm text-gray-500 mt-1">Chat and image calls labeled by the app. Older rows stay in Earlier.</p>
+				{clientRows.length === 0 ? (
+					<p className="mt-4 text-sm text-gray-500">No labeled requests in this window.</p>
+				) : (
+					<div className="mt-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+						{clientRows.map(row => (
+							<div key={row.name ?? 'earlier'} className="rounded-lg border border-gray-100 px-4 py-3">
+								<p className="text-sm font-medium text-gray-900">{clientLabel(row.name)}</p>
+								<p className="mt-1 text-2xl font-bold text-gray-800">{row.requests.toLocaleString('en-US')}</p>
+								<p className="text-xs text-gray-400">{row.completions.toLocaleString('en-US')} completions · ${((row.micros) / 1_000_000).toFixed(2)}</p>
+							</div>
+						))}
+					</div>
+				)}
+			</section>
 
 			{probe && (
 				<div className={`border-l-4 p-4 ${probe.ok ? 'bg-emerald-50 border-emerald-500 text-emerald-800' : 'bg-amber-50 border-amber-500 text-amber-900'}`}>
@@ -342,7 +397,7 @@ export default async function ModelsPage({
 						<table className="min-w-full divide-y divide-gray-200">
 							<thead className="bg-gray-50">
 								<tr>
-									{['When', 'User', 'Model', 'Status', 'Time', 'Error'].map(heading => (
+									{['When', 'User', 'Client', 'Model', 'Status', 'Time', 'Error'].map(heading => (
 										<th key={heading} className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{heading}</th>
 									))}
 								</tr>
@@ -352,6 +407,7 @@ export default async function ModelsPage({
 									<tr key={request.id}>
 										<td className="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">{formatWhen(request.createdAt)}</td>
 										<td className="px-4 py-3 text-sm text-gray-900">{request.user.email}</td>
+										<td className="px-4 py-3 text-sm text-gray-700 whitespace-nowrap">{clientLabel(request.client)}</td>
 										<td className="px-4 py-3 text-sm font-mono text-gray-800">
 											{request.model}
 											{request.routedFrom && <span className="block text-xs text-gray-500">from {request.routedFrom}</span>}

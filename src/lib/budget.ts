@@ -28,7 +28,7 @@ async function lockBudget(tx: Prisma.TransactionClient, userId: string) {
 }
 
 export type UsageMetadata = { requestId?: string; requestedModel?: string; operation?: 'chat' | 'image'; region?: string; unitPriceMicros?: number; imageCount?: number;
-	chatId?: string; cacheReadPerMillion?: number; cacheWritePerMillion?: number };
+	chatId?: string; cacheReadPerMillion?: number; cacheWritePerMillion?: number; client?: string };
 export async function reserveBudget(userId: string, model: string, source: string, reservedMicros: number, inputPerMillion: number, outputPerMillion: number, metadata: UsageMetadata = {}) {
 	if (!Number.isSafeInteger(reservedMicros) || reservedMicros < 0 || reservedMicros > 1_000_000_000
 		|| ![inputPerMillion, outputPerMillion].every(value => Number.isFinite(value) && value >= 0)) {
@@ -108,7 +108,7 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 			await tx.budgetEntry.create({ data: { userId: budget.userId, key: `settle:${id}`, kind: refund > 0 ? 'refund' : 'adjustment', amountMicros: refund, note: `${status}: ${reservation.model}` } });
 		}
 		if (!rejected) {
-			await tx.usageLog.create({ data: { userId: budget.userId, model: billedModel, source: reservation.source,
+			await tx.usageLog.create({ data: { userId: budget.userId, model: billedModel, source: reservation.source, client: reservation.client,
 				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: actual, accounting: status,
 				costBasis: !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
 				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation, region: reservation.region,

@@ -102,11 +102,11 @@ async function main() {
 		const usage = { prompt_tokens: 10000, completion_tokens: 100,
 			prompt_tokens_details: { cached_tokens: 8000, cache_creation_input_tokens: 1000 }, cost: 99 };
 		await Promise.all([settleBudget(row.id, usage), settleBudget(row.id, usage)]);
-		const next = await reserveBudget(userId, 'qwen', 'bedrock', 10000, 0.5, 1.2, { chatId: 'restored-chat' });
+		const next = await reserveBudget(userId, 'qwen', 'bedrock', 10000, 0.5, 1.2, { chatId: 'restored-chat', client: 'arni' });
 		await settleBudget(next.id, { prompt_tokens: 1000, completion_tokens: 100 });
 		const logs = await prisma.usageLog.findMany({ where: { userId, chatId: 'restored-chat' }, orderBy: { createdAt: 'asc' } });
-		assert.deepEqual(logs.map(log => [log.model, log.costMicros, log.cacheReadTokens, log.cacheWriteTokens]),
-			[['claude', 10650, 8000, 1000], ['qwen', 620, 0, 0]]);
+		assert.deepEqual(logs.map(log => [log.model, log.costMicros, log.cacheReadTokens, log.cacheWriteTokens, log.client]),
+			[['claude', 10650, 8000, 1000, null], ['qwen', 620, 0, 0, 'arni']]);
 	});
 	await check('missing usage keeps estimated reservation; rejected request refunds budget and step', async () => {
 		const before = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });

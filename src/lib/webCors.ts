@@ -25,7 +25,7 @@ export function webCorsHeaders(req: NextRequest, extraExpose = ''): Record<strin
 	return {
 		'Access-Control-Allow-Origin': origin,
 		'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-		'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key',
+		'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-Arni-Client',
 		'Access-Control-Expose-Headers': expose,
 		Vary: 'Origin',
 	};

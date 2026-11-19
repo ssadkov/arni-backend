@@ -15,6 +15,7 @@ import {
 import { fitImagePng, isPng } from './imagePng';
 import { client } from './llm/bedrock';
 import { recordModelRequest } from './modelRequests';
+import { requestClient } from './requestClient';
 
 export {
 	IMAGE_MODEL,
@@ -72,7 +73,8 @@ async function result(row: { id: string; model: string; status: string; errorCod
 }
 
 /** `chatId` attributes the charge to the desktop chat, so its cost shows in "Последний чат". */
-export async function generateImage(userId: string, requestKey: string, body: unknown, chatId?: string) {
+export async function generateImage(userId: string, requestKey: string, body: unknown, chatId?: string, reportedClient?: string | null) {
+	const app = requestClient(reportedClient);
 	if (!/^[a-zA-Z0-9_-]{16,100}$/.test(requestKey)) { throw new BudgetError('idempotency_key_required', 'Нужен Idempotency-Key длиной 16–100 символов.', 400); }
 	const input = imageRequest(body);
 	const card = imageModelCard(input.model);
@@ -118,6 +120,7 @@ export async function generateImage(userId: string, requestKey: string, body: un
 			region: IMAGE_REGION,
 			unitPriceMicros: card.costMicros,
 			imageCount: 1,
+			client: app,
 		});
 		reservationId = reservation.id;
 		await prisma.mediaGeneration.update({ where: { id: row.id }, data: { reservationId } });
@@ -174,6 +177,7 @@ export async function generateImage(userId: string, requestKey: string, body: un
 			operation: 'image',
 			statusCode: 200,
 			durationMs: Date.now() - startedAt,
+			client: app,
 		});
 		return result(saved);
 	} catch (error) {
@@ -193,6 +197,7 @@ export async function generateImage(userId: string, requestKey: string, body: un
 			statusCode: status || (error instanceof BudgetError ? error.status : 502),
 			durationMs: Date.now() - startedAt,
 			error: code,
+			client: app,
 		});
 		if (error instanceof BudgetError) { throw error; }
 		throw new BudgetError(

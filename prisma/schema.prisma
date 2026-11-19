@@ -64,6 +64,8 @@ model ModelRequest {
   requestedModel String?
   operation  String @default("chat")
   source     String?
+  // web, arni, arni-code, or unknown. Empty on rows written before client accounting.
+  client     String?
   region     String?
   statusCode Int
   durationMs Int
@@ -88,6 +90,8 @@ model UsageLog {
   completionTokens Int
   // bedrock или openrouter. Старые строки без источника узнаём по id модели.
   source           String?
+  // web, arni, arni-code, or unknown. Empty on rows written before client accounting.
+  client           String?
   costMicros       Int?
   accounting       String? // reported, estimated, or legacy
   costBasis        String? // provider, catalog, reservation; separate from legacy token-balance accounting
@@ -151,6 +155,7 @@ model BudgetReservation {
   userId          String
   model           String
   source          String
+  client          String?
   reservedMicros  Int
   inputPerMillion Float
   outputPerMillion Float

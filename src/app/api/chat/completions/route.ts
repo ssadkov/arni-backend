@@ -26,6 +26,7 @@ import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
 import { usageCostMicros } from '@/lib/budgetPolicy';
 import { modelCapabilities } from '@/lib/llm/modelCapabilities';
 import { freeRequestBody, routerCatalog, routerModel, zeroPrice } from '@/lib/llm/openRouterCatalog';
+import { requestClient } from '@/lib/requestClient';
 
 export const maxDuration = 300;
 
@@ -54,6 +55,7 @@ async function pickedGemini(body: Record<string, unknown>, model: string): Promi
 export async function POST(req: NextRequest) {
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
+  const client = requestClient(req.headers.get('x-arni-client'));
   const chatId = chatIdHeader(req.headers);
   let reservedUserId: string | null = null;
   let trackedUserId: string | undefined;
@@ -76,7 +78,7 @@ export async function POST(req: NextRequest) {
       durationMs: Date.now() - startedAt,
       error,
       routedFrom,
-      requestId, requestedModel, source: trackedSource, region: trackedSource === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined,
+      requestId, requestedModel, source: trackedSource, client, region: trackedSource === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined,
     });
   };
   try {
@@ -211,7 +213,7 @@ export async function POST(req: NextRequest) {
       if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
       const price = await budgetPrice(body, provider, model);
       const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output,
-        { requestId, requestedModel, chatId, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined });
+        { requestId, requestedModel, chatId, client, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined });
       budgetReservationId = reservation.id;
     }
     const catalogPrice = provider === 'bedrock' && forcedBedrockModel
@@ -307,7 +309,7 @@ export async function POST(req: NextRequest) {
       const input = catalogPrice?.inputPerMillion; const output = catalogPrice?.outputPerMillion;
       const measuredCost = isFreeModel ? 0 : provider === 'openrouter' && usage.cost !== undefined ? Math.ceil(usage.cost * 1_000_000)
         : input != null && output != null ? usageCostMicros(usage, input, output, input * (modelCapabilities(servedModel).cache?.readMultiplier ?? 1), input * (modelCapabilities(servedModel).cache?.writeMultiplier ?? 1)) : null;
-      const data = { userId: user.id, chatId, cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0, cacheWriteTokens: usage.prompt_tokens_details?.cache_creation_input_tokens || 0, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: usageSource,
+      const data = { userId: user.id, chatId, client, cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0, cacheWriteTokens: usage.prompt_tokens_details?.cache_creation_input_tokens || 0, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: usageSource,
         imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : null,
         inputPerMillion: input, outputPerMillion: output, costMicros: measuredCost,
         accounting: isFreeModel ? missingUsage ? 'estimated' : 'reported' : 'legacy', costBasis: measuredCost == null ? null : isFreeModel ? 'catalog' : provider === 'openrouter' ? 'provider' : 'catalog' };

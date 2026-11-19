@@ -15,6 +15,7 @@ export interface ModelRequestRecord {
 	operation?: 'chat' | 'image';
 	source?: string;
 	region?: string;
+	client?: string;
 }
 
 function compactError(error: string | null | undefined): string | null {
@@ -40,7 +41,7 @@ export async function recordModelRequest(input: ModelRequestRecord): Promise<voi
 				error: compactError(input.error),
 				routedFrom: input.routedFrom ? input.routedFrom.slice(0, MODEL_MAX_LENGTH) : null,
 				requestId: input.requestId, requestedModel: input.requestedModel?.slice(0, MODEL_MAX_LENGTH),
-				operation: input.operation, source: input.source, region: input.region,
+				operation: input.operation, source: input.source, region: input.region, client: input.client,
 			},
 		});
 	} catch (error) {
