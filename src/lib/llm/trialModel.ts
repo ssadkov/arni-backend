@@ -70,3 +70,27 @@ export function trialCatalogRow(router: readonly RouterModel[], maxCompletionTok
 		arni_provider: 'openrouter', arni_free: false, arni_default: false, arni_traffic: 'unknown', arni_recommended: false,
 	};
 }
+
+/**
+ * DeepSeek for paying accounts (those with an AccountBudget): the real OpenRouter id, billed from the account's
+ * budget at OpenRouter's reported cost. Same routing and output limit as the test. Runs on OPENROUTER_PAID_API_KEY
+ * when set (its own spend limit), otherwise on the main key.
+ */
+export const PAID_DEEPSEEK_MODEL = TRIAL_MODEL;
+
+/** Both DeepSeek ids reason before acting and get the long output limit whatever the client asks. */
+export function isDeepSeekPick(id: unknown): boolean {
+	return id === TRIAL_PICKER_ID || id === PAID_DEEPSEEK_MODEL;
+}
+
+export function paidDeepSeekKey(): string | undefined {
+	return process.env.OPENROUTER_PAID_API_KEY || process.env.OPENROUTER_API_KEY || undefined;
+}
+
+/** Picker row for paying accounts, under the real id; prices are OpenRouter's model-level ones. */
+export function paidDeepSeekRow(router: readonly RouterModel[], maxCompletionTokens: number) {
+	const row = trialCatalogRow(router, maxCompletionTokens);
+	if (!row) { return null; }
+	const model = router.find(item => item.id === PAID_DEEPSEEK_MODEL)!;
+	return { ...row, id: PAID_DEEPSEEK_MODEL, name: model.name, arni_recommended: true };
+}
