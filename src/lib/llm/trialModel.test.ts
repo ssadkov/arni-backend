@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { isTrialPick, TRIAL_MODEL, TRIAL_PICKER_ID, trialAllowed, trialCatalogRow, trialDailyLimitMicros, trialDayStart, trialProvider } from './trialModel.ts';
+import { isDeepSeekPick, isTrialPick, PAID_DEEPSEEK_MODEL, paidDeepSeekKey, paidDeepSeekRow, TRIAL_MAX_OUTPUT_TOKENS, TRIAL_MODEL, TRIAL_PICKER_ID, trialAllowed, trialCatalogRow, trialDailyLimitMicros, trialDayStart, trialProvider } from './trialModel.ts';
 
 const KEYS = ['OPENROUTER_TRIAL_API_KEY', 'DEEPSEEK_TRIAL_EMAILS', 'DEEPSEEK_TRIAL_DAILY_USD', 'DEEPSEEK_TRIAL_PROVIDERS', 'DEEPSEEK_TRIAL_MAX_PROMPT_USD', 'DEEPSEEK_TRIAL_MAX_COMPLETION_USD'];
 
@@ -42,4 +42,23 @@ test('DeepSeek picker row keeps OpenRouter metadata under the test id', () => {
 	assert.deepEqual(row && { id: row.id, name: row.name, max: row.top_provider.max_completion_tokens, free: row.arni_free, context: row.context_length },
 		{ id: TRIAL_PICKER_ID, name: 'DeepSeek: V4.1 Flash (тест)', max: 32_000, free: false, context: 1_048_576 });
 	assert.equal(trialCatalogRow([], 32_000), null);
+});
+
+test('Paying accounts get DeepSeek under its real id, on the paid key when one is set', () => {
+	const router = [{ id: TRIAL_MODEL, name: 'DeepSeek: V4.1 Flash', top_provider: { max_completion_tokens: 943_718 } }];
+	const row = paidDeepSeekRow(router, TRIAL_MAX_OUTPUT_TOKENS);
+	assert.deepEqual(row && { id: row.id, name: row.name, max: row.top_provider.max_completion_tokens, recommended: row.arni_recommended },
+		{ id: PAID_DEEPSEEK_MODEL, name: 'DeepSeek: V4.1 Flash', max: 64_000, recommended: true });
+	assert.deepEqual([TRIAL_PICKER_ID, PAID_DEEPSEEK_MODEL, 'deepseek/deepseek-v4-pro'].map(isDeepSeekPick), [true, true, false]);
+	const saved = [process.env.OPENROUTER_PAID_API_KEY, process.env.OPENROUTER_API_KEY];
+	try {
+		process.env.OPENROUTER_API_KEY = 'main';
+		delete process.env.OPENROUTER_PAID_API_KEY;
+		const fallback = paidDeepSeekKey();
+		process.env.OPENROUTER_PAID_API_KEY = 'paid';
+		assert.deepEqual([fallback, paidDeepSeekKey()], ['main', 'paid']);
+	} finally {
+		if (saved[0] === undefined) { delete process.env.OPENROUTER_PAID_API_KEY; } else { process.env.OPENROUTER_PAID_API_KEY = saved[0]; }
+		if (saved[1] === undefined) { delete process.env.OPENROUTER_API_KEY; } else { process.env.OPENROUTER_API_KEY = saved[1]; }
+	}
 });

@@ -13,7 +13,7 @@ import { completeWithBedrock } from '@/lib/llm/bedrock';
 import { modelIdForUser } from '@/lib/llm/bedrockAccess';
 import { completeWithOpenRouter } from '@/lib/llm/openrouter';
 import { completeWithGemini, geminiPickerAllowed, parseGeminiPickerId } from '@/lib/llm/gemini';
-import { isTrialPick, TRIAL_MODEL, TRIAL_PICKER_ID, trialAllowed, trialDailyLimitMicros, trialDayStart, trialProvider } from '@/lib/llm/trialModel';
+import { isTrialPick, PAID_DEEPSEEK_MODEL, paidDeepSeekKey, TRIAL_MODEL, TRIAL_PICKER_ID, trialAllowed, trialDailyLimitMicros, trialDayStart, trialProvider } from '@/lib/llm/trialModel';
 import { resolveLlmProvider } from '@/lib/llm/provider';
 import { recordModelRequest } from '@/lib/modelRequests';
 import { isModelAccessDenied, rememberRejected, rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
@@ -138,6 +138,8 @@ export async function POST(req: NextRequest) {
       if (!geminiPickerAllowed(user.email)) { throw new BudgetError('model_unavailable', 'Модель отсутствует в текущем каталоге. Обновите список моделей.', 400); }
       trackedSource = usageSource = 'gemini';
     }
+    // DeepSeek for paying accounts: billed from their budget like a Bedrock model.
+    const paidDeepSeek = provider === 'openrouter' && Boolean(budget) && body.model === PAID_DEEPSEEK_MODEL;
     // Paid DeepSeek test (`arni-trial/...:free`): named accounts only, capped per account per UTC day.
     const trialPick = isTrialPick(body.model);
     if (trialPick) {
@@ -158,8 +160,8 @@ export async function POST(req: NextRequest) {
     trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
 
     // Paid OpenRouter models are disabled: Arni pays for them in cash. Paid usage goes
-    // through Bedrock (AWS credits); OpenRouter serves only :free variants and the DeepSeek test.
-    if (provider === 'openrouter' && !isFreeModel && !trialPick) {
+    // through Bedrock (AWS credits); OpenRouter serves only :free variants and DeepSeek (test and paying accounts).
+    if (provider === 'openrouter' && !isFreeModel && !trialPick && !paidDeepSeek) {
       const message = 'Платные модели OpenRouter отключены. Выберите модель AWS Bedrock или бесплатную модель.';
       await track(403, message);
       return NextResponse.json({
@@ -229,6 +231,8 @@ export async function POST(req: NextRequest) {
       const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output,
         { requestId, requestedModel, chatId, client, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined });
       budgetReservationId = reservation.id;
+      // budgetPrice set a ceiling at the catalog price; DeepSeek keeps the test's routing (Wafer first) and reports its cost.
+      if (paidDeepSeek) { body.provider = trialProvider(); body.usage = { include: true }; }
     }
     const catalogPrice = provider === 'bedrock' && forcedBedrockModel
       ? await prisma.bedrockModel.findUnique({ where: { id: forcedBedrockModel } }) : null;
@@ -236,7 +240,7 @@ export async function POST(req: NextRequest) {
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel, catalogPrice)
       : geminiPick ? await pickedGemini(body, geminiPick)
-      : await completeWithOpenRouter(await freeRequestBody(body), trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : undefined);
+      : await completeWithOpenRouter(await freeRequestBody(body), trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : paidDeepSeek ? paidDeepSeekKey() : undefined);
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.

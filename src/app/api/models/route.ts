@@ -8,7 +8,7 @@ import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/l
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
 import { billingRates } from '@/lib/billingCurrency';
 import { geminiPickerAllowed, geminiPickerCatalog } from '@/lib/llm/gemini';
-import { TRIAL_MAX_OUTPUT_TOKENS, trialAllowed, trialCatalogRow } from '@/lib/llm/trialModel';
+import { paidDeepSeekRow, TRIAL_MAX_OUTPUT_TOKENS, trialAllowed, trialCatalogRow } from '@/lib/llm/trialModel';
 import { defaultFreeModelId, isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
 
 function outputLimit(model: RouterModel): number {
@@ -66,7 +66,9 @@ export async function GET(req: NextRequest) {
 			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
 		}));
 		const trialRow = trial ? trialCatalogRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
-		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...(trialRow ? [trialRow] : []), ...bedrock, ...models, ...gemini] }, {
+		// Paying accounts get DeepSeek from their budget, listed first among the paid models.
+		const paidRow = managed ? paidDeepSeekRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
+		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...(trialRow ? [trialRow] : []), ...(paidRow ? [paidRow] : []), ...bedrock, ...models, ...gemini] }, {
 			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },
 		});
 	} catch (error) {
