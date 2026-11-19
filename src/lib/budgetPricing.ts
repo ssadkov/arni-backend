@@ -6,6 +6,7 @@ import { FREE_MAX_OUTPUT_TOKENS, managedOutputLimit, modelCapabilities } from '.
 import { countBedrockInput } from './llm/bedrock';
 import { routerModel, routerCacheMode, type RouterModel } from './llm/openRouterCatalog';
 import { isDeepSeekPick, TRIAL_MAX_OUTPUT_TOKENS } from './llm/trialModel';
+import { pruneScreenshots } from './llm/screenshotHistory';
 
 export type BudgetBody = {
 	model: string; messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>;
@@ -27,6 +28,8 @@ export function managedBody(body: BudgetBody, allowImages = false): BudgetBody {
 			? 'Поддерживаются текст, PNG/JPEG и инструменты агента. Другие форматы и платные серверные инструменты недоступны.'
 			: 'Для этого провайдера поддерживаются текст и инструменты агента. Для скриншотов выберите Claude через Bedrock.', 400);
 	}
+	// The client resends every screenshot each step; keep the newest instead of refusing the request.
+	if (allowImages) { body = { ...body, messages: pruneScreenshots(body.messages) }; }
 	// Free models cost nothing per token, and long reasoning must not end before the tool call.
 	const model = typeof body.model === 'string' ? body.model : '';
 	// DeepSeek thinks before it acts; 16K ran out before the tool call (2026-11-20).
