@@ -10,7 +10,9 @@ export type BudgetBody = {
 	model: string; messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>;
 	stream?: boolean; max_tokens?: number; max_completion_tokens?: number;
 	temperature?: number; tool_choice?: unknown; stream_options?: { include_usage: boolean };
-	provider?: { max_price: { prompt: number; completion: number; request: number }; require_parameters: boolean };
+	provider?: { max_price: { prompt: number; completion: number; request?: number }; require_parameters: boolean; order?: string[]; allow_fallbacks?: boolean };
+	/** OpenRouter usage accounting: reports `cost` with the usage. */
+	usage?: { include: boolean };
 };
 
 /** Allow embedded screenshots for Bedrock; strip unsupported billable request options. */

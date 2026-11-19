@@ -35,7 +35,14 @@ export function costMicros(prompt: number, completion: number, inputPerMillion: 
 }
 
 export type ReportedUsage = { prompt_tokens: number; completion_tokens: number; cost?: number;
-	prompt_tokens_details?: { cached_tokens: number; cache_creation_input_tokens: number } };
+	prompt_tokens_details?: { cached_tokens: number; cache_creation_input_tokens: number };
+	/** OpenRouter's serving host (`provider` next to `usage`), e.g. "Wafer". */
+	host?: string };
+
+/** Attaches OpenRouter's serving host to the usage it was reported with. */
+export function withHost(usage: ReportedUsage | null, provider: unknown): ReportedUsage | null {
+	return usage && typeof provider === 'string' && provider.trim() ? { ...usage, host: provider.trim().slice(0, 60) } : usage;
+}
 
 /** Prompt tokens include all three input buckets; cached tokens must not be billed twice. */
 export function usageCostMicros(usage: ReportedUsage, input: number, output: number, cacheRead = input, cacheWrite = input): number {
@@ -79,7 +86,7 @@ export class UsageParser {
 			if (dataText === '[DONE]') { this.done = true; break; }
 			try {
 				const data = JSON.parse(dataText);
-				const usage = validUsage(data.usage);
+				const usage = withHost(validUsage(data.usage), data.provider);
 				if (usage) { this.usage = usage; }
 			} catch { /* Non-JSON events. */ }
 		}

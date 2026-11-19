@@ -17,8 +17,9 @@ export function cachedRouterBody(body: any) {
 	return { ...body, messages };
 }
 
-export async function completeWithOpenRouter(body: unknown): Promise<Response> {
-	const openRouterApiKey = process.env.OPENROUTER_API_KEY;
+/** `apiKey` defaults to the main key; the paid DeepSeek test passes its own spend-limited key. */
+export async function completeWithOpenRouter(body: unknown, apiKey = process.env.OPENROUTER_API_KEY): Promise<Response> {
+	const openRouterApiKey = apiKey;
 	if (!openRouterApiKey) {
 		return Response.json({ error: 'OpenRouter API Key not configured' }, { status: 500 });
 	}
