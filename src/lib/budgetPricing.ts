@@ -5,6 +5,7 @@ import { screenshotCount, supportsScreenshots, conservativeInputTokenBound } fro
 import { FREE_MAX_OUTPUT_TOKENS, managedOutputLimit, modelCapabilities } from './llm/modelCapabilities';
 import { countBedrockInput } from './llm/bedrock';
 import { routerModel, routerCacheMode, type RouterModel } from './llm/openRouterCatalog';
+import { isTrialPick, TRIAL_MAX_OUTPUT_TOKENS } from './llm/trialModel';
 
 export type BudgetBody = {
 	model: string; messages: Array<Record<string, unknown>>; tools?: Array<Record<string, unknown>>;
@@ -28,7 +29,8 @@ export function managedBody(body: BudgetBody, allowImages = false): BudgetBody {
 	}
 	// Free models cost nothing per token, and long reasoning must not end before the tool call.
 	const model = typeof body.model === 'string' ? body.model : '';
-	const outputLimit = model.endsWith(':free') ? FREE_MAX_OUTPUT_TOKENS : managedOutputLimit(model);
+	// The DeepSeek test thinks before it acts; 16K ran out before the tool call (2026-11-20).
+	const outputLimit = isTrialPick(model) ? TRIAL_MAX_OUTPUT_TOKENS : model.endsWith(':free') ? FREE_MAX_OUTPUT_TOKENS : managedOutputLimit(model);
 	const requested = body.max_completion_tokens ?? body.max_tokens ?? outputLimit;
 	if (allowImages) { screenshotCount(body.messages); }
 	if (!Number.isFinite(requested) || requested < 1) { throw new BudgetError('invalid_output_limit', 'Некорректный лимит ответа.', 400); }

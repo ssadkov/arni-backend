@@ -8,6 +8,11 @@ import type { RouterModel } from './openRouterCatalog';
  */
 export const TRIAL_PICKER_ID = 'arni-trial/deepseek-v4.1-flash-1017:free';
 export const TRIAL_MODEL = 'deepseek/deepseek-v4.1-flash-1017';
+/**
+ * DeepSeek thinks by default, and reasoning counts toward the output limit. With the free models' 16K a long
+ * answer plus reasoning ran out before the tool call. 64K costs at most ~$0.03 per step at Wafer's $0.50/1M.
+ */
+export const TRIAL_MAX_OUTPUT_TOKENS = 64_000;
 
 export function isTrialPick(id: unknown): boolean {
 	return id === TRIAL_PICKER_ID;

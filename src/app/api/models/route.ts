@@ -8,7 +8,7 @@ import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/l
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
 import { billingRates } from '@/lib/billingCurrency';
 import { geminiPickerAllowed, geminiPickerCatalog } from '@/lib/llm/gemini';
-import { trialAllowed, trialCatalogRow } from '@/lib/llm/trialModel';
+import { TRIAL_MAX_OUTPUT_TOKENS, trialAllowed, trialCatalogRow } from '@/lib/llm/trialModel';
 import { defaultFreeModelId, isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
 
 function outputLimit(model: RouterModel): number {
@@ -65,7 +65,7 @@ export async function GET(req: NextRequest) {
 			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
 			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
 		}));
-		const trialRow = trial ? trialCatalogRow(router, FREE_MAX_OUTPUT_TOKENS) : null;
+		const trialRow = trial ? trialCatalogRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
 		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...(trialRow ? [trialRow] : []), ...bedrock, ...models, ...gemini] }, {
 			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },
 		});
