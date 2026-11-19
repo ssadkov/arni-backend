@@ -8,25 +8,47 @@ import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 
 export const dynamic = 'force-dynamic';
 
+async function readUserCard(id: string) {
+	try {
+		const user = await prisma.user.findUnique({
+			where: { id },
+			include: { modelAccess: true, budget: { include: { entries: { orderBy: { createdAt: 'desc' }, take: 20 }, reservations: { orderBy: { createdAt: 'desc' }, take: 30 } } } },
+		});
+		if (!user) {
+			return null;
+		}
+		const [models, spent, apiUsage, rates] = await Promise.all([
+			prisma.bedrockModel.findMany(),
+			prisma.usageLog.aggregate({
+				where: { userId: id, NOT: { model: { endsWith: ':free' } }, OR: [{ accounting: null }, { accounting: 'legacy' }] },
+				_sum: { promptTokens: true, completionTokens: true },
+			}),
+			prisma.usageLog.aggregate({ where: { userId: id, accounting: { in: ['reported', 'estimated'] } }, _sum: { costMicros: true, promptTokens: true, completionTokens: true } }),
+			billingRates(),
+		]);
+		return { user, models, spent, apiUsage, rates };
+	} catch {
+		return 'error' as const;
+	}
+}
+
 export default async function UserAccessPage({ params }: { params: Promise<{ id: string }> }) {
 	const { id } = await params;
-	const user = await prisma.user.findUnique({
-		where: { id },
-		include: { modelAccess: true, budget: { include: { entries: { orderBy: { createdAt: 'desc' }, take: 20 }, reservations: { orderBy: { createdAt: 'desc' }, take: 30 } } } },
-	});
-	if (!user) {
+	const card = await readUserCard(id);
+	if (card === 'error') {
+		return (
+			<div className="space-y-6">
+				<Link href="/admin/users" className="text-sm text-indigo-600 hover:text-indigo-800">← Пользователи</Link>
+				<div className="bg-red-50 border-l-4 border-red-500 p-4 text-red-700">
+					<p>Карточка не открылась: запрос к базе не прошёл. Обновите схему и перезагрузите страницу.</p>
+				</div>
+			</div>
+		);
+	}
+	if (!card) {
 		notFound();
 	}
-
-	const [models, spent, apiUsage, rates] = await Promise.all([
-		prisma.bedrockModel.findMany(),
-		prisma.usageLog.aggregate({
-			where: { userId: id, NOT: { model: { endsWith: ':free' } }, OR: [{ accounting: null }, { accounting: 'legacy' }] },
-			_sum: { promptTokens: true, completionTokens: true },
-		}),
-		prisma.usageLog.aggregate({ where: { userId: id, accounting: { in: ['reported', 'estimated'] } }, _sum: { costMicros: true, promptTokens: true, completionTokens: true } }),
-		billingRates(),
-	]);
+	const { user, models, spent, apiUsage, rates } = card;
 
 	const spentTokens = (spent._sum.promptTokens || 0) + (spent._sum.completionTokens || 0);
 	const grants = new Map(user.modelAccess.map((grant) => [grant.modelId, grant.enabled]));
