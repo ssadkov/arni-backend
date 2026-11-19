@@ -13,6 +13,7 @@ import { completeWithBedrock } from '@/lib/llm/bedrock';
 import { modelIdForUser } from '@/lib/llm/bedrockAccess';
 import { completeWithOpenRouter } from '@/lib/llm/openrouter';
 import { completeWithGemini, geminiPickerAllowed, parseGeminiPickerId } from '@/lib/llm/gemini';
+import { isTrialPick, TRIAL_MODEL, TRIAL_PICKER_ID, trialAllowed, trialDailyLimitMicros, trialDayStart, trialProvider } from '@/lib/llm/trialModel';
 import { resolveLlmProvider } from '@/lib/llm/provider';
 import { recordModelRequest } from '@/lib/modelRequests';
 import { isModelAccessDenied, rememberRejected, rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
@@ -20,7 +21,7 @@ import { chatIdHeader } from '@/lib/chatIdHeader';
 import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
 import { CONTEXT_ERROR_MESSAGE, isContextError } from '@/lib/llm/contextError';
 import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
-import { validUsage, type ReportedUsage } from '@/lib/budgetPolicy';
+import { validUsage, withHost, type ReportedUsage } from '@/lib/budgetPolicy';
 import { usageStream } from '@/lib/usageStream';
 import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
 import { usageCostMicros } from '@/lib/budgetPolicy';
@@ -137,16 +138,28 @@ export async function POST(req: NextRequest) {
       if (!geminiPickerAllowed(user.email)) { throw new BudgetError('model_unavailable', 'Модель отсутствует в текущем каталоге. Обновите список моделей.', 400); }
       trackedSource = usageSource = 'gemini';
     }
+    // Paid DeepSeek test (`arni-trial/...:free`): named accounts only, capped per account per UTC day.
+    const trialPick = isTrialPick(body.model);
+    if (trialPick) {
+      if (!trialAllowed(user.email)) { throw new BudgetError('model_unavailable', 'Модель отсутствует в текущем каталоге. Обновите список моделей.', 400); }
+      const dayStart = trialDayStart();
+      const spent = await prisma.usageLog.aggregate({ _sum: { costMicros: true }, where: { userId: user.id, requestedModel: TRIAL_PICKER_ID, createdAt: { gte: dayStart } } });
+      if ((spent._sum.costMicros ?? 0) >= trialDailyLimitMicros()) {
+        throw new BudgetError('trial_daily_limit', 'Дневной лимит теста DeepSeek исчерпан. Он обновится в 00:00 UTC.', 429, new Date(dayStart.getTime() + 86_400_000).toISOString());
+      }
+      body.model = TRIAL_MODEL;
+    }
     const isFreeModel = provider === 'openrouter' && typeof body.model === 'string' && body.model.endsWith(':free');
     if (provider === 'openrouter' && !geminiPick) {
       await routerModel(body.model, images > 0);
       if (isFreeModel) { body.provider = { max_price: { prompt: 0, completion: 0, request: 0 }, require_parameters: true }; }
+      if (trialPick) { body.provider = trialProvider(); body.usage = { include: true }; }
     }
     trackedModel = typeof body.model === 'string' && body.model ? body.model : 'unknown';
 
     // Paid OpenRouter models are disabled: Arni pays for them in cash. Paid usage goes
-    // through Bedrock (AWS credits); OpenRouter serves only :free variants.
-    if (provider === 'openrouter' && !isFreeModel) {
+    // through Bedrock (AWS credits); OpenRouter serves only :free variants and the DeepSeek test.
+    if (provider === 'openrouter' && !isFreeModel && !trialPick) {
       const message = 'Платные модели OpenRouter отключены. Выберите модель AWS Bedrock или бесплатную модель.';
       await track(403, message);
       return NextResponse.json({
@@ -208,7 +221,8 @@ export async function POST(req: NextRequest) {
     }
 
     // 4. Выбранный провайдер. Ответ всегда в формате OpenAI, чтобы редактор не менялся.
-    if (budget && !isFreeModel) {
+    // The DeepSeek test is paid by Arni, not from the account's budget.
+    if (budget && !isFreeModel && !trialPick) {
       const model = forcedBedrockModel || body.model;
       if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
       const price = await budgetPrice(body, provider, model);
@@ -222,7 +236,7 @@ export async function POST(req: NextRequest) {
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel, catalogPrice)
       : geminiPick ? await pickedGemini(body, geminiPick)
-      : await completeWithOpenRouter(await freeRequestBody(body));
+      : await completeWithOpenRouter(await freeRequestBody(body), trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : undefined);
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.
@@ -302,7 +316,9 @@ export async function POST(req: NextRequest) {
         return;
       }
       const missingUsage = !usage;
-      if (!usage && !isFreeModel) { return; }
+      // The DeepSeek test is logged like a free model, with OpenRouter's reported cost and serving host.
+      const logOnly = isFreeModel || trialPick;
+      if (!usage && !logOnly) { return; }
       usage ??= { prompt_tokens: 0, completion_tokens: 0 };
       const promptTokens = usage.prompt_tokens;
       const completionTokens = usage.completion_tokens;
@@ -310,10 +326,11 @@ export async function POST(req: NextRequest) {
       const measuredCost = isFreeModel ? 0 : provider === 'openrouter' && usage.cost !== undefined ? Math.ceil(usage.cost * 1_000_000)
         : input != null && output != null ? usageCostMicros(usage, input, output, input * (modelCapabilities(servedModel).cache?.readMultiplier ?? 1), input * (modelCapabilities(servedModel).cache?.writeMultiplier ?? 1)) : null;
       const data = { userId: user.id, chatId, client, cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0, cacheWriteTokens: usage.prompt_tokens_details?.cache_creation_input_tokens || 0, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: usageSource,
-        imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : null,
+        // Upstream location: AWS region for Bedrock, serving host for the DeepSeek test.
+        imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : trialPick ? usage.host ?? null : null,
         inputPerMillion: input, outputPerMillion: output, costMicros: measuredCost,
-        accounting: isFreeModel ? missingUsage ? 'estimated' : 'reported' : 'legacy', costBasis: measuredCost == null ? null : isFreeModel ? 'catalog' : provider === 'openrouter' ? 'provider' : 'catalog' };
-      if (isFreeModel) { await prisma.usageLog.create({ data }); }
+        accounting: logOnly ? missingUsage ? 'estimated' : 'reported' : 'legacy', costBasis: measuredCost == null ? null : isFreeModel ? 'catalog' : provider === 'openrouter' ? 'provider' : 'catalog' };
+      if (logOnly) { await prisma.usageLog.create({ data }); }
       else {
         await prisma.$transaction([
           prisma.user.update({ where: { id: user.id }, data: { tokenBalance: { decrement: promptTokens + completionTokens } } }),
@@ -340,7 +357,7 @@ export async function POST(req: NextRequest) {
 
     // 6. Обработка обычного (не потокового) запроса
     const json = await response.json();
-    await recordUsage(validUsage(json.usage));
+    await recordUsage(withHost(validUsage(json.usage), json.provider));
 
     return NextResponse.json(json, {
       headers: { ...servedHeaders, ...(freeSteps ? freeStepHeaders(freeSteps) : {}) },
