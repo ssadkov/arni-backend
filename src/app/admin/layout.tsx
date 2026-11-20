@@ -23,13 +23,13 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
             🧠 Модели Bedrock
           </Link>
           <Link href="/admin/traffic" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
-            Traffic
+            📈 Traffic
           </Link>
           <Link href="/admin/waitlist" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
             ⏳ Лист ожидания Pro
           </Link>
           <Link href="/admin/payments" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
-            Платежи
+            💳 Платежи
           </Link>
           <Link href="/admin/settings" className="block px-4 py-2 rounded-md hover:bg-slate-800 hover:text-white transition">
             ⚙️ Настройки
