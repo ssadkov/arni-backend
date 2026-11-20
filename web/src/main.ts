@@ -13,9 +13,12 @@ type Hit = { title: string; url: string; snippet: string };
 type ImageRef = { id: string; mediaType: string };
 type Message = { id: string; role: string; text: string; status: string; sources: Hit[]; images: ImageRef[] };
 type BudgetWindow = { usedMicros: number; limitMicros: number; requests: number; requestLimit: number; resetsAt: string | null };
+type Bonus = { modelId: string; balanceMicros: number; grantedMicros: number; expiresAt: string; expired: boolean };
+type Funding = 'bonus' | 'account';
 type Account = {
   email: string;
   freeSteps: { remaining: number; limit: number; resetsAt: string };
+  deepSeekBonus?: Bonus | null;
   budget?: {
     enabled: boolean;
     expired: boolean;
@@ -30,6 +33,7 @@ type Model = {
   name?: string;
   arni_default?: boolean;
   arni_free?: boolean;
+  arni_bonus?: boolean;
   arni_provider?: string;
   architecture?: { input_modalities?: string[] };
 };
@@ -52,6 +56,7 @@ let chats: Chat[] = [];
 let activeId = '';
 let messages: Message[] = [];
 let account: Account | null = null;
+let deepSeekFunding: Funding = 'bonus';
 let models: Model[] = [];
 let pendingImage: { file: File; preview: string; id?: string } | null = null;
 let imageMode = false;
@@ -87,6 +92,23 @@ function icon(name: keyof typeof icons) {
 
 function usd(micros: number) {
   return `$${(micros / 1_000_000).toFixed(2)}`;
+}
+
+function activeBonus(bonus: Bonus) {
+  return !bonus.expired && Date.now() < Date.parse(bonus.expiresAt) && bonus.balanceMicros > 0;
+}
+
+function bonusSummary() {
+  const bonus = account?.deepSeekBonus;
+  if (!bonus) return '';
+  if (bonus.expired || Date.now() >= Date.parse(bonus.expiresAt)) return 'срок истёк';
+  const date = new Date(Date.parse(bonus.expiresAt) - 1).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'Asia/Almaty' });
+  return `${usd(bonus.balanceMicros)} из ${usd(bonus.grantedMicros)} · до ${date} включительно`;
+}
+
+function hasAccountFunds() {
+  const budget = account?.budget;
+  return !!budget && budget.enabled && !budget.expired && Date.now() < Date.parse(budget.validUntil) && budget.balanceMicros > 0;
 }
 
 function escapeHtml(value: string) {
@@ -235,13 +257,15 @@ function limitsHtml() {
     return '';
   }
   const budget = account.budget;
+  const bonus = account.deepSeekBonus ? `<div><dt>Бонус DeepSeek</dt><dd>${escapeHtml(bonusSummary())}</dd></div>` : '';
   if (!budget) {
-    return `<div><strong>${escapeHtml(account.email)}</strong><dl><div><dt>Бесплатные шаги</dt><dd>${account.freeSteps.remaining} из ${account.freeSteps.limit}</dd></div></dl></div>`;
+    return `<div><strong>${escapeHtml(account.email)}</strong><dl>${bonus}<div><dt>Бесплатные шаги</dt><dd>${account.freeSteps.remaining} из ${account.freeSteps.limit}</dd></div></dl></div>`;
   }
   const windowLine = (title: string, window: BudgetWindow) => `<div><dt>${title}</dt><dd>${usd(window.usedMicros)} / ${usd(window.limitMicros)} · ${window.requests}/${window.requestLimit}</dd></div>`;
   const state = !budget.enabled || budget.expired ? '<p class="error">Доступ приостановлен или срок истёк.</p>' : '';
   return `<div><strong>${escapeHtml(account.email)}</strong>${state}<dl>
     <div><dt>Бюджет</dt><dd>${usd(Math.max(0, budget.balanceMicros))} до ${escapeHtml(budget.validUntil.slice(0, 10))}</dd></div>
+    ${bonus}
     ${windowLine('5 часов', budget.fiveHour)}
     ${windowLine('7 дней', budget.weekly)}
   </dl></div>`;
@@ -297,6 +321,7 @@ function renderApp() {
           <span class="account-details">
             <span class="account-name">${escapeHtml(account?.email || 'Аккаунт')}</span>
             <span class="account-summary" id="account-summary">${escapeHtml(accountSummary())}</span>
+            <span class="account-summary account-bonus" id="account-bonus"></span>
           </span>${icon('chevron')}
         </button>
       </aside>
@@ -334,6 +359,10 @@ function renderApp() {
               <button id="image-mode" class="mode-button" type="button" aria-label="Выйти из режима создания изображения" hidden>${icon('spark')} Изображение ${icon('close')}</button>
               <button id="send" class="primary send-button" type="submit" aria-label="Отправить">${icon('send')}<span>Отправить</span></button>
             </div>
+            <label id="deepseek-funding" class="deepseek-funding" hidden>
+              Оплата DeepSeek
+              <select id="funding"><option value="bonus">Бонус DeepSeek</option><option value="account">Баланс аккаунта</option></select>
+            </label>
             <div id="image-gen-picker" class="image-gen-picker" hidden>
               <p class="image-gen-hint muted">Выберите тип картинки. Описание лучше на английском — русский Stability сейчас отклоняет. Сервер не угадывает модель сам.</p>
               <div id="image-gen-options" class="image-gen-options" role="radiogroup" aria-label="Модель изображения"></div>
@@ -465,6 +494,12 @@ function renderApp() {
     localStorage.setItem(FREE_ONLY_KEY, String(freeOnly.checked));
     paintModels();
   });
+  document.querySelector<HTMLSelectElement>('#funding')?.addEventListener('change', event => {
+    deepSeekFunding = (event.currentTarget as HTMLSelectElement).value === 'account' ? 'account' : 'bonus';
+    setStatus('');
+    paintComposer();
+  });
+  paintLimits();
   paintChats();
   paintModels();
   paintMessages();
@@ -479,6 +514,11 @@ function paintLimits() {
   const summary = document.querySelector('#account-summary');
   if (summary) {
     summary.textContent = accountSummary();
+  }
+  const bonus = document.querySelector('#account-bonus');
+  if (bonus) {
+    const text = bonusSummary();
+    bonus.textContent = text ? `Бонус DeepSeek · ${text}` : '';
   }
 }
 
@@ -555,7 +595,7 @@ function paintModels() {
   list.innerHTML = groups.filter(group => group.models.length).map(group => `<section class="model-group">
     <h3>${group.title}</h3>
     ${group.models.map(model => `<button type="button" class="model-option" data-model="${escapeHtml(model.id)}" aria-pressed="${model.id === current}">
-      <span><strong>${escapeHtml(model.name || model.id)}</strong><small>${escapeHtml(model.arni_provider === 'bedrock' ? 'Amazon Bedrock' : model.arni_provider === 'openrouter' ? 'OpenRouter' : model.id)}${supportsImage(model) ? ' · Изображения' : ''}</small></span>
+      <span><strong>${escapeHtml(model.name || model.id)}</strong><small>${escapeHtml(model.arni_provider === 'bedrock' ? 'Amazon Bedrock' : model.arni_provider === 'openrouter' ? 'OpenRouter' : model.id)}${supportsImage(model) ? ' · Изображения' : ''}${model.arni_bonus && (!account?.deepSeekBonus || activeBonus(account.deepSeekBonus)) ? ' · Бонус' : ''}</small></span>
       ${model.id === current ? icon('check') : ''}
     </button>`).join('')}
   </section>`).join('');
@@ -630,13 +670,21 @@ function paintComposer() {
   const modelTrigger = document.querySelector<HTMLButtonElement>('#show-models')!;
   modelTrigger.hidden = imageMode;
   modelTrigger.disabled = sending;
+  const bonus = account?.deepSeekBonus;
+  const bonusSelected = bonus && bonus.modelId === selectedModel();
+  const canPayFromAccount = hasAccountFunds();
+  const funding = document.querySelector<HTMLSelectElement>('#funding')!;
+  document.querySelector<HTMLElement>('#deepseek-funding')!.hidden = imageMode || !bonusSelected || !canPayFromAccount;
+  funding.disabled = sending || opening;
+  funding.value = canPayFromAccount ? deepSeekFunding : 'bonus';
+  const noBonusFunds = bonusSelected && funding.value === 'bonus' && !activeBonus(bonus);
   document.querySelector<HTMLButtonElement>('#new-chat')!.disabled = sending || opening;
   document.querySelector<HTMLButtonElement>('#sign-out')!.disabled = sending || opening;
   paintImageGenModels();
   const imageModelReady = !!selectedImageGenModel() && imageGenEnabled !== false;
   document.querySelector<HTMLButtonElement>('#send')!.disabled = sending || opening || (imageMode
     ? !input.value.trim() || !imageModelReady
-    : !selectedModel() || (!input.value.trim() && !pendingImage));
+    : !selectedModel() || noBonusFunds || (!input.value.trim() && !pendingImage));
 }
 
 function paintMessages() {
@@ -711,6 +759,7 @@ async function refreshAccount() {
     signOut();
     return;
   }
+  if (!response.ok) throw new Error('Account unavailable');
   const body = await response.json() as { user: Account };
   account = body.user;
 }
@@ -898,6 +947,13 @@ async function send(draw: boolean) {
     return;
   }
   const selected = models.find(item => item.id === model);
+  const bonus = account?.deepSeekBonus;
+  const funding = bonus?.modelId === model ? (hasAccountFunds() ? deepSeekFunding : 'bonus')
+    : selected?.arni_bonus ? 'bonus' : undefined;
+  if (!draw && funding === 'bonus' && bonus && !activeBonus(bonus)) {
+    setStatus('Бонус DeepSeek исчерпан или истёк. Выберите другой источник оплаты или модель.', true);
+    return;
+  }
   if (image && selected && !supportsImage(selected)) {
     setStatus('Для вложения выберите модель с поддержкой изображений.', true);
     return;
@@ -936,7 +992,7 @@ async function send(draw: boolean) {
     const path = draw ? 'images' : 'messages';
     const payload = draw
       ? { prompt: text, aspect_ratio: '1:1', model: imageGenModel }
-      : { text, model, imageId };
+      : { text, model, imageId, funding };
     submitted = true;
     const response = await api(`/api/web/chats/${activeId}/${path}`, {
       method: 'POST',
@@ -977,7 +1033,12 @@ async function send(draw: boolean) {
     paintComposer();
     paintChats();
     void refreshChats();
-    void refreshAccount().then(paintLimits).catch(() => undefined);
+    void refreshAccount().then(() => {
+      if (!document.querySelector('#composer')) return;
+      paintLimits();
+      paintModels();
+      paintComposer();
+    }).catch(() => undefined);
   }
 }
 
@@ -1033,6 +1094,8 @@ function signOut() {
   chats = [];
   chatsLoading = false;
   chatsError = false;
+  account = null;
+  deepSeekFunding = 'bonus';
   token = '';
   localStorage.removeItem(TOKEN_KEY);
   renderGate('');

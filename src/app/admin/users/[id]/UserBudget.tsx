@@ -59,6 +59,33 @@ export default function UserBudget({ userId, budget, rubRate }: { userId: string
 	</form>;
 }
 
+export function GrantDeepSeekBonus({ userId, amount }: { userId: string; amount: string }) {
+	const router = useRouter();
+	const [busy, setBusy] = useState(false);
+	const [message, setMessage] = useState('');
+	async function grant() {
+		setBusy(true);
+		setMessage('');
+		try {
+			const response = await fetch(`/api/admin/users/${userId}/deepseek-bonus`, { method: 'POST' });
+			if (!response.ok) {
+				const payload = await response.json().catch(() => null);
+				setMessage(payload?.error || 'Не удалось начислить бонус.');
+				return;
+			}
+			router.refresh();
+		} catch {
+			setMessage('Не удалось подтвердить начисление. Можно повторить.');
+		} finally {
+			setBusy(false);
+		}
+	}
+	return <div>
+		<button type="button" onClick={grant} disabled={busy} className="text-indigo-600 disabled:opacity-50">Начислить {amount}</button>
+		<p role="status">{message}</p>
+	</div>;
+}
+
 export function ReconcileReservation({ userId, reservationId }: { userId: string; reservationId: string }) {
 	const router = useRouter();
 	const [busy, setBusy] = useState(false);

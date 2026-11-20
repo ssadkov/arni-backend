@@ -10,6 +10,7 @@ import { billingRates } from '@/lib/billingCurrency';
 import { geminiPickerAllowed, geminiPickerCatalog } from '@/lib/llm/gemini';
 import { paidDeepSeekRow, TRIAL_MAX_OUTPUT_TOKENS, trialAllowed, trialCatalogRow } from '@/lib/llm/trialModel';
 import { defaultFreeModelId, isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
+import { bonusSnapshot, deepSeekBonus } from '@/lib/deepSeekBonus';
 
 function outputLimit(model: RouterModel): number {
 	const limit = zeroPrice(model) ? FREE_MAX_OUTPUT_TOKENS : MANAGED_MAX_OUTPUT_TOKENS;
@@ -26,14 +27,18 @@ export async function GET(req: NextRequest) {
 		let bedrock: Record<string, unknown>[] = [];
 		let gemini: Record<string, unknown>[] = [];
 		let trial = false;
+		let bonusAvailable = false;
 		const auth = req.headers.get('authorization');
 		if (auth?.startsWith('Bearer ')) {
 			let userId: string;
 			try { userId = (await decryptJWT(auth.slice(7))).userId; }
 			catch { return NextResponse.json({ error: 'Invalid Token' }, { status: 401, headers: webCorsHeaders(req) }); }
-			const user = await prisma.user.findUnique({ where: { id: userId }, include: { budget: true } });
+			const [user, wallet] = await Promise.all([
+				prisma.user.findUnique({ where: { id: userId }, include: { budget: true } }), deepSeekBonus(userId),
+			]);
 			if (!user || user.isBanned) { return NextResponse.json({ error: 'Account is blocked' }, { status: 403, headers: webCorsHeaders(req) }); }
 			managed = Boolean(user.budget);
+			bonusAvailable = wallet !== null && bonusSnapshot(wallet).balanceMicros > 0;
 			// Google's free tier is offered to named accounts only (GEMINI_PICKER_EMAILS).
 			if (geminiPickerAllowed(user.email)) { gemini = geminiPickerCatalog(FREE_MAX_OUTPUT_TOKENS); }
 			// Paid DeepSeek test for named accounts only (DEEPSEEK_TRIAL_EMAILS).
@@ -65,10 +70,10 @@ export async function GET(req: NextRequest) {
 			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
 			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
 		}));
-		const trialRow = trial ? trialCatalogRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
-		// Paying accounts get DeepSeek from their budget, listed first among the paid models.
-		const paidRow = managed ? paidDeepSeekRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
-		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...(trialRow ? [trialRow] : []), ...(paidRow ? [paidRow] : []), ...bedrock, ...models, ...gemini] }, {
+		const trialRow = trial && !bonusAvailable ? trialCatalogRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
+		const paidRow = managed || bonusAvailable ? paidDeepSeekRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
+		return NextResponse.json({ arni_managed: managed || bonusAvailable, billingRates: rates,
+			data: [...(trialRow ? [trialRow] : []), ...(paidRow ? [{ ...paidRow, arni_bonus: bonusAvailable }] : []), ...bedrock, ...models, ...gemini] }, {
 			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },
 		});
 	} catch (error) {

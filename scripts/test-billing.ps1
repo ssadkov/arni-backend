@@ -46,6 +46,8 @@ try {
 	if ($LASTEXITCODE -ne 0) { throw 'Cache usage migration failed' }
 	& .\node_modules\.bin\prisma.cmd db execute --file deploy/billing/20261119-request-client.sql --schema prisma/schema.prisma
 	if ($LASTEXITCODE -ne 0) { throw 'Request client migration failed' }
+	& .\node_modules\.bin\prisma.cmd db execute --file deploy/billing/20261120-deepseek-bonus.sql --schema prisma/schema.prisma
+	if ($LASTEXITCODE -ne 0) { throw 'DeepSeek bonus migration failed' }
 	node scripts/test-billing.cjs
 	if ($LASTEXITCODE -ne 0) { throw 'Billing checks failed' }
 	node scripts/test-media.cjs

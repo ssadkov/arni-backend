@@ -16,7 +16,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 	}
 	await settleBudget(reservation.id, null);
 	await prisma.budgetEntry.upsert({ where: { key: `reconcile:${reservation.id}` }, update: {}, create: {
-		userId: id, key: `reconcile:${reservation.id}`, kind: 'reconcile', amountMicros: 0,
+		userId: id, walletId: reservation.walletId, key: `reconcile:${reservation.id}`, kind: 'reconcile', amountMicros: 0,
 		note: `Администратор закрыл зависший резерв без возврата: ${reservation.id}`,
 	} });
 	return NextResponse.json({ ok: true });

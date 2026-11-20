@@ -4,6 +4,7 @@ import { BudgetError } from '@/lib/budget';
 import { generateImage } from '@/lib/imageGeneration';
 import { decodeScreenshot } from '@/lib/llm/vision';
 import prisma from '@/lib/prisma';
+import type { DeepSeekFunding } from '@/lib/deepSeekBonus';
 import { searchConfigured, searchWeb, type WebSearchHit } from '@/lib/webSearch';
 
 export const MEMORY_LIMIT = 4_000;
@@ -207,19 +208,20 @@ export async function prepareTurn(userId: string, chatId: string, text: string, 
 	return message.id;
 }
 
-export async function runTurn(token: string, userId: string, chatId: string, model: string) {
+export async function runTurn(token: string, userId: string, chatId: string, model: string, funding?: DeepSeekFunding) {
 	if (!model || model.length > 200) {
 		throw new BudgetError('model_required', 'Выберите модель.', 400);
 	}
 	const memory = await prisma.webMemory.findUnique({ where: { userId } });
 	const messages = await modelMessages(userId, chatId, memory?.text ?? '');
 	const sources: WebSearchHit[] = [];
+	const request = { model, arni_funding: funding };
 	let settledText: string | null = null;
 	if (searchConfigured()) {
 		let used = 0;
 		messages.unshift(SEARCH_GUIDANCE);
 		while (used < SEARCH_LIMIT) {
-			const response = await callModel(token, chatId, { model, messages, tools: [SEARCH_TOOL], tool_choice: 'auto', stream: false });
+			const response = await callModel(token, chatId, { ...request, messages, tools: [SEARCH_TOOL], tool_choice: 'auto', stream: false });
 			const payload = await response.json().catch(() => null);
 			if (!response.ok) {
 				return { error: payload || { error: { message: 'Модель отклонила запрос.' } }, status: response.status };
@@ -245,7 +247,7 @@ export async function runTurn(token: string, userId: string, chatId: string, mod
 		await saveAssistant(chatId, settledText, 'complete', sources);
 		return { text: settledText, sources };
 	}
-	const upstream = await callModel(token, chatId, { model, messages: finalAnswerMessages(messages.filter(message => message !== SEARCH_GUIDANCE)), stream: true });
+	const upstream = await callModel(token, chatId, { ...request, messages: finalAnswerMessages(messages.filter(message => message !== SEARCH_GUIDANCE)), stream: true });
 	if (!upstream.ok || !upstream.body) {
 		const payload = await upstream.json().catch(() => null);
 		return { error: payload || { error: { message: 'Не удалось получить ответ.' } }, status: upstream.status };

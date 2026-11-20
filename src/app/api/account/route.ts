@@ -5,6 +5,7 @@ import { accountPayload } from '@/lib/freeSteps';
 import { budgetSnapshot } from '@/lib/budget';
 import { billingRates } from '@/lib/billingCurrency';
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
+import { bonusSnapshot, deepSeekBonus } from '@/lib/deepSeekBonus';
 
 export const dynamic = 'force-dynamic';
 
@@ -35,10 +36,11 @@ export async function GET(req: NextRequest) {
 		return NextResponse.json({ error: 'Account is blocked' }, { status: 403, headers });
 	}
 
-	const [budget, rates] = await Promise.all([
-		prisma.accountBudget.findUnique({ where: { userId } }), billingRates(),
+	const [budget, rates, wallet] = await Promise.all([
+		prisma.accountBudget.findUnique({ where: { userId } }), billingRates(), deepSeekBonus(userId),
 	]);
-	return NextResponse.json({ user: { ...accountPayload(user), budget: budget ? budgetSnapshot(budget) : null, billingRates: rates } }, {
+	return NextResponse.json({ user: { ...accountPayload(user), budget: budget ? budgetSnapshot(budget) : null,
+		deepSeekBonus: wallet ? bonusSnapshot(wallet) : null, billingRates: rates } }, {
 		headers: { 'Cache-Control': 'no-store', ...headers },
 	});
 }

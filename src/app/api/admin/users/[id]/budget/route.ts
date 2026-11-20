@@ -31,7 +31,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 		const currentRubRate = inRubles ? (await billingRates()).RUB : null;
 		const result = await prisma.$transaction(async tx => {
 			// Locks both initial creation and subsequent grants. No user plan change is needed.
-			const users = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "User" WHERE "id" = ${id} FOR UPDATE`;
+			const users = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "User" WHERE "id" = ${id} FOR NO KEY UPDATE`;
 			if (!users.length) { return null; }
 			const entryKey = `grant:${key}`;
 			const existing = await tx.budgetEntry.findUnique({ where: { key: entryKey } });

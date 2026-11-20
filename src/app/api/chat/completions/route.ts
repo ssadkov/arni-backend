@@ -19,6 +19,7 @@ import { recordModelRequest } from '@/lib/modelRequests';
 import { isModelAccessDenied, rememberRejected, rememberUnavailable, routeFreeModel } from '@/lib/openRouterStatus';
 import { chatIdHeader } from '@/lib/chatIdHeader';
 import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
+import { deepSeekBonus } from '@/lib/deepSeekBonus';
 import { CONTEXT_ERROR_MESSAGE, isContextError } from '@/lib/llm/contextError';
 import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
 import { validUsage, withHost, type ReportedUsage } from '@/lib/budgetPolicy';
@@ -122,7 +123,18 @@ export async function POST(req: NextRequest) {
       body = JSON.parse(raw);
     } catch { return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 }); }
     if (!body || typeof body !== 'object' || Array.isArray(body)) { return NextResponse.json({ error: 'Invalid request' }, { status: 400 }); }
-    const budget = await prisma.accountBudget.findUnique({ where: { userId: user.id } });
+    const funding = body.arni_funding;
+    const deepSeek = body.model === PAID_DEEPSEEK_MODEL;
+    if (funding !== undefined && (!deepSeek || (funding !== 'account' && funding !== 'bonus'))) {
+      throw new BudgetError('invalid_funding', 'Некорректный источник оплаты модели.', 400);
+    }
+    const [budget, wallet] = await Promise.all([
+      prisma.accountBudget.findUnique({ where: { userId: user.id } }), deepSeek ? deepSeekBonus(user.id) : null,
+    ]);
+    if (funding === 'bonus' && !wallet) {
+      throw new BudgetError('bonus_unavailable', 'Бонус DeepSeek недоступен для этого аккаунта.', 403);
+    }
+    const bonusWallet = wallet && funding !== 'account' && (funding === 'bonus' || new Date() < wallet.expiresAt) ? wallet : null;
     // Explicit catalog IDs determine the route; account preference only chooses a default.
     const provider = typeof body.model === 'string' && (body.model.includes('/') || body.model.endsWith(':free')) ? 'openrouter' : resolveLlmProvider('BEDROCK');
     trackedSource = usageSource = provider;
@@ -138,8 +150,7 @@ export async function POST(req: NextRequest) {
       if (!geminiPickerAllowed(user.email)) { throw new BudgetError('model_unavailable', 'Модель отсутствует в текущем каталоге. Обновите список моделей.', 400); }
       trackedSource = usageSource = 'gemini';
     }
-    // DeepSeek for paying accounts: billed from their budget like a Bedrock model.
-    const paidDeepSeek = provider === 'openrouter' && Boolean(budget) && body.model === PAID_DEEPSEEK_MODEL;
+    const paidDeepSeek = deepSeek && Boolean(budget || bonusWallet);
     // Paid DeepSeek test (`arni-trial/...:free`): named accounts only, capped per account per UTC day.
     const trialPick = isTrialPick(body.model);
     if (trialPick) {
@@ -224,12 +235,13 @@ export async function POST(req: NextRequest) {
 
     // 4. Выбранный провайдер. Ответ всегда в формате OpenAI, чтобы редактор не менялся.
     // The DeepSeek test is paid by Arni, not from the account's budget.
-    if (budget && !isFreeModel && !trialPick) {
+    if ((budget || bonusWallet) && !isFreeModel && !trialPick) {
       const model = forcedBedrockModel || body.model;
       if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
       const price = await budgetPrice(body, provider, model);
       const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output,
-        { requestId, requestedModel, chatId, client, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined });
+        { requestId, requestedModel, chatId, client, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined },
+        bonusWallet?.id);
       budgetReservationId = reservation.id;
       // budgetPrice set a ceiling at the catalog price; DeepSeek keeps the test's routing (Wafer first) and reports its cost.
       if (paidDeepSeek) { body.provider = trialProvider(); body.usage = { include: true }; }
