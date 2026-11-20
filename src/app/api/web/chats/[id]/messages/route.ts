@@ -4,6 +4,7 @@ import prisma from '@/lib/prisma';
 import { webCorsHeaders, webJson, webOptions } from '@/lib/webCors';
 import { webUser } from '@/lib/webSession';
 import { ownChat, prepareTurn, publicMessage, runTurn, saveAssistant, textFromSse } from '@/lib/webTurn';
+import type { DeepSeekFunding } from '@/lib/deepSeekBonus';
 
 export function OPTIONS(req: NextRequest) {
 	return webOptions(req);
@@ -30,9 +31,9 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 	try {
 		const { user, token } = await webUser(req);
 		const { id } = await context.params;
-		const body = await req.json().catch(() => null) as { text?: string; imageId?: string; model?: string } | null;
+		const body = await req.json().catch(() => null) as { text?: string; imageId?: string; model?: string; funding?: DeepSeekFunding } | null;
 		await prepareTurn(user.id, id, body?.text || '', body?.imageId);
-		const turn = await runTurn(token, user.id, id, body?.model || '');
+		const turn = await runTurn(token, user.id, id, body?.model || '', body?.funding);
 		if ('error' in turn && turn.error) {
 			return webJson(req, turn.error, turn.status);
 		}

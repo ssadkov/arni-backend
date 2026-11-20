@@ -25,14 +25,19 @@ export async function GET(req: NextRequest) {
 			prisma.budgetEntry.findMany({
 				where: { userId: user.id, kind: { in: ['grant', 'payment', 'payment_refund'] } },
 				orderBy: { createdAt: 'desc' }, take: 30,
-				select: { id: true, kind: true, amountMicros: true, rubKopecks: true, note: true, createdAt: true },
+				select: { id: true, kind: true, amountMicros: true, rubKopecks: true, note: true, createdAt: true, walletId: true },
 			}),
 			prisma.usageLog.findMany({
 				where: { userId: user.id }, orderBy: { createdAt: 'desc' }, take: 30,
-				select: { id: true, model: true, createdAt: true, costMicros: true, providerCostMicros: true, promptTokens: true, completionTokens: true },
+				select: { id: true, model: true, createdAt: true, costMicros: true, providerCostMicros: true, promptTokens: true, completionTokens: true, requestId: true },
 			}),
 			modelsAllowedForUser(user.id),
 		]);
+		const requestIds = usage.flatMap(row => row.requestId ? [row.requestId] : []);
+		const bonusRequests = new Set(requestIds.length ? (await prisma.budgetReservation.findMany({
+			where: { userId: user.id, requestId: { in: requestIds }, walletId: { not: null } },
+			select: { requestId: true },
+		})).map(row => row.requestId) : []);
 		const price = (perMillion: number | null, percent: number) => perMillion == null ? null : {
 			provider: formatBillingRub(perMillion * 1_000_000, rates.RUB),
 			user: formatBillingRub(markedPerMillion(perMillion, percent) * 1_000_000, rates.RUB),
@@ -52,7 +57,9 @@ export async function GET(req: NextRequest) {
 		return webJson(req, {
 			rates, checkoutReady: checkoutConfigured(),
 			budget: budget ? { ...budgetSnapshot(budget), limitsEnabled: budget.limitsEnabled } : null,
-			entries, usage, tariffs,
+			entries: entries.map(({ walletId, ...row }) => ({ ...row, bonus: walletId !== null })),
+			usage: usage.map(({ requestId, ...row }) => ({ ...row, bonus: bonusRequests.has(requestId) })),
+			tariffs,
 		});
 	} catch (error) {
 		const known = error instanceof BudgetError;

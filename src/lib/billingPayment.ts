@@ -122,7 +122,7 @@ export async function handlePaymentNotice(input: PaymentNoticeInput, rubPerUsd?:
 	if (!user) { throw new PaymentNoticeError(404, 'USER_NOT_FOUND', `Пользователь ${userId} не найден`); }
 
 	return prisma.$transaction(async tx => {
-		await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+		await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR NO KEY UPDATE`;
 		const existing = await tx.paymentNotice.findUnique({ where: { idAccount } });
 		const data = {
 			userId, accountNumber: optionalText(input.accountNumber), idRate: input.idRate.trim(), accountStatus, status,

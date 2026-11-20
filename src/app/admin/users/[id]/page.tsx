@@ -2,8 +2,9 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import prisma from '@/lib/prisma';
 import UserModels from './UserModels';
-import UserBudget, { ReconcileReservation } from './UserBudget';
+import UserBudget, { GrantDeepSeekBonus, ReconcileReservation } from './UserBudget';
 import { budgetSnapshot } from '@/lib/budget';
+import { bonusSnapshot, deepSeekBonus, DEEPSEEK_BONUS_EXPIRES_AT, DEEPSEEK_BONUS_MICROS } from '@/lib/deepSeekBonus';
 import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 
 export const dynamic = 'force-dynamic';
@@ -12,12 +13,15 @@ async function readUserCard(id: string) {
 	try {
 		const user = await prisma.user.findUnique({
 			where: { id },
-			include: { modelAccess: true, budget: { include: { entries: { orderBy: { createdAt: 'desc' }, take: 20 }, reservations: { orderBy: { createdAt: 'desc' }, take: 30 } } } },
+			include: { modelAccess: true, budget: true,
+				budgetEntries: { orderBy: { createdAt: 'desc' }, take: 20 },
+				budgetReservations: { orderBy: { createdAt: 'desc' }, take: 30 },
+			},
 		});
 		if (!user) {
 			return null;
 		}
-		const [models, spent, apiUsage, rates] = await Promise.all([
+		const [models, spent, apiUsage, rates, wallet] = await Promise.all([
 			prisma.bedrockModel.findMany(),
 			prisma.usageLog.aggregate({
 				where: { userId: id, NOT: { model: { endsWith: ':free' } }, OR: [{ accounting: null }, { accounting: 'legacy' }] },
@@ -25,8 +29,9 @@ async function readUserCard(id: string) {
 			}),
 			prisma.usageLog.aggregate({ where: { userId: id, accounting: { in: ['reported', 'estimated'] } }, _sum: { costMicros: true, promptTokens: true, completionTokens: true } }),
 			billingRates(),
+			deepSeekBonus(id),
 		]);
-		return { user, models, spent, apiUsage, rates };
+		return { user, models, spent, apiUsage, rates, wallet };
 	} catch {
 		return 'error' as const;
 	}
@@ -48,11 +53,14 @@ export default async function UserAccessPage({ params }: { params: Promise<{ id:
 	if (!card) {
 		notFound();
 	}
-	const { user, models, spent, apiUsage, rates } = card;
+	const { user, models, spent, apiUsage, rates, wallet } = card;
 
 	const spentTokens = (spent._sum.promptTokens || 0) + (spent._sum.completionTokens || 0);
 	const grants = new Map(user.modelAccess.map((grant) => [grant.modelId, grant.enabled]));
 	const budget = user.budget ? budgetSnapshot(user.budget) : null;
+	const bonus = wallet ? bonusSnapshot(wallet) : null;
+	const bonusDate = new Date(DEEPSEEK_BONUS_EXPIRES_AT.getTime() - 1).toLocaleDateString('ru-RU', { timeZone: 'Asia/Almaty' });
+	const dollars = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 	const money = (micros: number) => formatBillingRub(micros, rates.RUB);
 	const modelPrice = (usd: number | null) => formatBillingRub(usd === null ? null : usd * 1_000_000, rates.RUB);
 	models.sort((a, b) => {
@@ -83,13 +91,20 @@ export default async function UserAccessPage({ params }: { params: Promise<{ id:
 				})}
 			</div>}
 			<UserBudget key={rates.RUB ?? 'USD'} userId={user.id} rubRate={rates.RUB} budget={user.budget ? { enabled: user.budget.enabled, limitsEnabled: user.budget.limitsEnabled, fiveHourLimitMicros: user.budget.fiveHourLimitMicros, weeklyLimitMicros: user.budget.weeklyLimitMicros, fiveHourRequestLimit: user.budget.fiveHourRequestLimit, weeklyRequestLimit: user.budget.weeklyRequestLimit } : null} />
+			<div className="bg-white border rounded-xl p-4 space-y-2">
+				<h3 className="font-semibold">Бонус DeepSeek V4.1 Flash</h3>
+				{bonus ? <p>{bonus.expired ? 'Срок действия истёк.' : `Остаток ${dollars(bonus.balanceMicros)} из ${dollars(bonus.grantedMicros)} · до ${bonusDate} включительно`}</p>
+					: !user.isBanned && new Date() < DEEPSEEK_BONUS_EXPIRES_AT
+						? <><p className="text-sm text-gray-500">Действует до {bonusDate} включительно по времени Алматы.</p><GrantDeepSeekBonus userId={user.id} amount={dollars(DEEPSEEK_BONUS_MICROS)} /></>
+						: <p className="text-sm text-gray-500">Начисление недоступно.</p>}
+			</div>
 			{budget && <p className="text-sm text-gray-600">Всего в новом учёте: {money(apiUsage._sum.costMicros || 0)}; входных токенов {(apiUsage._sum.promptTokens || 0).toLocaleString('ru-RU')}, выходных {(apiUsage._sum.completionTokens || 0).toLocaleString('ru-RU')}. При отсутствии usage токены остаются неизвестными, расход помечается как оценочный.</p>}
-			{user.budget && <div className="bg-white border rounded-xl p-4 space-y-4 overflow-x-auto">
+			{(user.budget || bonus) && <div className="bg-white border rounded-xl p-4 space-y-4 overflow-x-auto">
 				<h3 className="font-semibold">Последние расходы API</h3>
 				<p className="text-xs text-gray-500">reported — usage провайдера; для Bedrock стоимость рассчитана по каталогу. estimated — usage не получен, удержан резерв. pending — выполняется или требует сверки. Через 10 минут резерв можно закрыть по оценке: вся сумма остаётся списанной, доступ к следующим запросам открывается. Тексты запросов не сохраняются.</p>
-				<table className="w-full text-sm"><thead><tr><th className="text-left">Модель</th><th>Вход / выход</th><th>Стоимость</th><th>Учёт</th></tr></thead><tbody>{user.budget.reservations.map(row => <tr key={row.id}><td className="py-2">{row.model}<div className="text-xs text-gray-500">{row.createdAt.toLocaleString('ru-RU', { timeZone: 'Asia/Qyzylorda' })} · {row.id}</div></td><td className="text-center">{row.promptTokens ?? '—'} / {row.completionTokens ?? '—'}</td><td className="text-center">{money(row.costMicros ?? row.reservedMicros)}{row.providerCostMicros != null ? <div className="text-xs text-gray-500">себестоимость {money(row.providerCostMicros)}</div> : null}</td><td className="text-center">{row.status}{row.status === 'pending' ? <ReconcileReservation userId={user.id} reservationId={row.id} /> : null}</td></tr>)}</tbody></table>
+				<table className="w-full text-sm"><thead><tr><th className="text-left">Модель</th><th>Вход / выход</th><th>Стоимость</th><th>Учёт</th></tr></thead><tbody>{user.budgetReservations.map(row => <tr key={row.id}><td className="py-2">{row.model}<div className="text-xs text-gray-500">{row.createdAt.toLocaleString('ru-RU', { timeZone: 'Asia/Qyzylorda' })} · {row.id}{row.walletId && ' · Бонус'}</div></td><td className="text-center">{row.promptTokens ?? '—'} / {row.completionTokens ?? '—'}</td><td className="text-center">{money(row.costMicros ?? row.reservedMicros)}{row.providerCostMicros != null ? <div className="text-xs text-gray-500">себестоимость {money(row.providerCostMicros)}</div> : null}</td><td className="text-center">{row.status}{row.status === 'pending' ? <ReconcileReservation userId={user.id} reservationId={row.id} /> : null}</td></tr>)}</tbody></table>
 				<h3 className="font-semibold">Журнал баланса</h3>
-				{user.budget.entries.map(entry => <div key={entry.id} className="flex justify-between gap-4 text-sm"><span>{entry.kind}: {entry.note}</span><span className="font-mono whitespace-nowrap">{money(entry.amountMicros)}</span></div>)}
+				{user.budgetEntries.map(entry => <div key={entry.id} className="flex justify-between gap-4 text-sm"><span>{entry.walletId && 'Бонус · '}{entry.kind}: {entry.note}</span><span className="font-mono whitespace-nowrap">{money(entry.amountMicros)}</span></div>)}
 			</div>}
 			<div className="grid grid-cols-3 gap-4">
 				<div className="bg-white rounded-xl border border-gray-100 p-4">
