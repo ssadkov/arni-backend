@@ -332,6 +332,13 @@ dialog h2 { font-size: 1.125rem; }
 .limits dl { display: grid; gap: 0.5rem; margin: 0.75rem 0 0; }
 .limits dt { color: var(--muted); }
 .limits dd { margin: 0; }
+#billing-dialog { width: min(40rem, calc(100vw - 2rem)); }
+.billing-tabs, .billing-links { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.billing-tabs button[aria-pressed="true"] { border-color: var(--accent, #3d6b4f); }
+.billing-panel { display: grid; gap: 0.75rem; }
+.billing-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; max-height: 50vh; overflow: auto; }
+.billing-list li { display: grid; gap: 0.15rem; }
+.billing-list small { color: var(--muted); }
 .memory-form { padding-top: 1.25rem; }
 .memory-form textarea { min-height: 9rem; resize: vertical; }
 

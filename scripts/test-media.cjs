@@ -61,6 +61,7 @@ async function main() {
 	process.env.AWS_BEARER_TOKEN_BEDROCK_IMAGES = 'mock-images-only';
 	const user = await prisma.user.create({ data: { email: `media-${crypto.randomUUID()}@billing-test.invalid` } }); userId = user.id;
 	await prisma.accountBudget.create({ data: { userId, balanceMicros: 2_000_000, validUntil: new Date(Date.now() + 86400_000), fiveHourLimitMicros: 2_000_000, weeklyLimitMicros: 2_000_000, fiveHourRequestLimit: 100, weeklyRequestLimit: 100 } });
+	await prisma.billingMarkup.upsert({ where: { id: 'global' }, create: { id: 'global', percent: 0 }, update: { percent: 0 } });
 	const model = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
 	await prisma.bedrockModel.upsert({ where: { id: model }, update: { inputPerMillion: 3, outputPerMillion: 15 }, create: { id: model, name: 'Screenshot test', inputPerMillion: 3, outputPerMillion: 15, enabled: true } });
 	await check('managed catalog offers allowed models and selected model is invoked and billed; denied model is blocked', async () => {

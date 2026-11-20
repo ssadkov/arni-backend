@@ -7,6 +7,7 @@ import { FREE_MAX_OUTPUT_TOKENS, MANAGED_MAX_OUTPUT_TOKENS, managedModelMetadata
 import { routerCatalog, routerCacheMode, zeroPrice, type RouterModel } from '@/lib/llm/openRouterCatalog';
 import { webCorsHeaders, webOptions } from '@/lib/webCors';
 import { billingRates } from '@/lib/billingCurrency';
+import { markedPerMillion, markupTable, percentFromTable } from '@/lib/billingMarkup';
 import { geminiPickerAllowed, geminiPickerCatalog } from '@/lib/llm/gemini';
 import { paidDeepSeekRow, TRIAL_MAX_OUTPUT_TOKENS, trialAllowed, trialCatalogRow } from '@/lib/llm/trialModel';
 import { defaultFreeModelId, isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
@@ -43,17 +44,20 @@ export async function GET(req: NextRequest) {
 			if (geminiPickerAllowed(user.email)) { gemini = geminiPickerCatalog(FREE_MAX_OUTPUT_TOKENS); }
 			// Paid DeepSeek test for named accounts only (DEEPSEEK_TRIAL_EMAILS).
 			trial = trialAllowed(user.email);
+			const markups = managed || trial ? await markupTable() : new Map<string, number>();
 			if (managed) {
 				const allowed = await modelsAllowedForUser(userId);
 				const selected = await modelIdForUser(userId, user.bedrockModelId);
 				const priced = allowed.filter(model => model.inputPerMillion != null && model.outputPerMillion != null);
 				// Paid models are Bedrock only (AWS credits); a short curated list keeps the picker readable.
-				bedrock = pickBedrockModels(priced, selected).map(model => ({
+				bedrock = pickBedrockModels(priced, selected).map(model => {
+					const percent = percentFromTable(markups, { source: 'bedrock', model: model.id });
+					return {
 					// Never the default: a paid model is used only when the user picks it.
 					id: model.id, name: model.name, arni_default: false, arni_recommended: isRecommendedModel(model.id),
 					arni_provider: 'bedrock', supported_parameters: ['tools'], ...managedModelMetadata(model.id),
-					pricing: { prompt: String(model.inputPerMillion! / 1_000_000), completion: String(model.outputPerMillion! / 1_000_000) },
-				}));
+					pricing: { prompt: String(markedPerMillion(model.inputPerMillion!, percent) / 1_000_000), completion: String(markedPerMillion(model.outputPerMillion!, percent) / 1_000_000) },
+				}; });
 			}
 		}
 		// A provider outage must not remove otherwise available Bedrock models.
@@ -71,7 +75,13 @@ export async function GET(req: NextRequest) {
 			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
 		}));
 		const trialRow = trial && !bonusAvailable ? trialCatalogRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
-		const paidRow = managed || bonusAvailable ? paidDeepSeekRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
+		const paidBase = managed || bonusAvailable ? paidDeepSeekRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
+		const paidPercent = paidBase && managed ? percentFromTable(await markupTable(), { source: 'openrouter', model: String(paidBase.id) }) : 0;
+		const marked = (value: unknown) => {
+			const amount = Number(value);
+			return Number.isFinite(amount) ? String(markedPerMillion(amount * 1_000_000, paidPercent) / 1_000_000) : value;
+		};
+		const paidRow = paidBase?.pricing ? { ...paidBase, pricing: { ...paidBase.pricing, prompt: marked(paidBase.pricing.prompt), completion: marked(paidBase.pricing.completion) } } : paidBase;
 		return NextResponse.json({ arni_managed: managed || bonusAvailable, billingRates: rates,
 			data: [...(trialRow ? [trialRow] : []), ...(paidRow ? [{ ...paidRow, arni_bonus: bonusAvailable }] : []), ...bedrock, ...models, ...gemini] }, {
 			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },

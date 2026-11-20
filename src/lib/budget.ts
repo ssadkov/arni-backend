@@ -1,6 +1,7 @@
 import type { AccountBudget, Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
 import { costMicros, usageCostMicros, currentWindow, staleReservationCutoff, FIVE_HOURS_MS, WEEK_MS, MAX_CONCURRENT_RESERVATIONS, type ReportedUsage } from './budgetPolicy';
+import { applyMarkup } from './billingMarkup';
 
 export class BudgetError extends Error {
 	constructor(public readonly code: string, message: string, public readonly status = 429, public readonly resetsAt?: string) {
@@ -15,7 +16,7 @@ export function budgetSnapshot(budget: AccountBudget, now = new Date()) {
 			resetsAt: current.startedAt ? new Date(current.startedAt.getTime() + duration).toISOString() : null };
 	};
 	return {
-		enabled: budget.enabled, currency: 'USD', balanceMicros: budget.balanceMicros,
+		enabled: budget.enabled, limitsEnabled: budget.limitsEnabled !== false, currency: 'USD', balanceMicros: budget.balanceMicros,
 		validUntil: budget.validUntil.toISOString(), expired: now >= budget.validUntil,
 		fiveHour: window(FIVE_HOURS_MS, budget.fiveHourStartedAt, budget.fiveHourUsedMicros, budget.fiveHourRequests, budget.fiveHourLimitMicros, budget.fiveHourRequestLimit),
 		weekly: window(WEEK_MS, budget.weeklyStartedAt, budget.weeklyUsedMicros, budget.weeklyRequests, budget.weeklyLimitMicros, budget.weeklyRequestLimit),
@@ -33,7 +34,7 @@ async function lockWallet(tx: Prisma.TransactionClient, id: string) {
 }
 
 export type UsageMetadata = { requestId?: string; requestedModel?: string; operation?: 'chat' | 'image'; region?: string; unitPriceMicros?: number; imageCount?: number;
-	chatId?: string; cacheReadPerMillion?: number; cacheWritePerMillion?: number; client?: string };
+	chatId?: string; cacheReadPerMillion?: number; cacheWritePerMillion?: number; client?: string; markupPercent?: number };
 export async function reserveBudget(userId: string, model: string, source: string, reservedMicros: number, inputPerMillion: number, outputPerMillion: number, metadata: UsageMetadata = {}, walletId?: string) {
 	if (!Number.isSafeInteger(reservedMicros) || reservedMicros < 0 || reservedMicros > 1_000_000_000
 		|| ![inputPerMillion, outputPerMillion].every(value => Number.isFinite(value) && value >= 0)) {
@@ -71,16 +72,18 @@ export async function reserveBudget(userId: string, model: string, source: strin
 		const budget = await lockBudget(tx, userId);
 		const now = new Date();
 		if (!budget.enabled || now >= budget.validUntil) {
-			throw new BudgetError('access_expired', 'Выданный доступ приостановлен или истёк. Обратитесь к администратору.', 403);
+			throw new BudgetError('access_expired', 'Срок доступа истёк. Пополните баланс в аккаунте.', 403);
 		}
 		const snapshot = budgetSnapshot(budget, now);
-		for (const [name, window] of [['five_hour_limit', snapshot.fiveHour], ['weekly_limit', snapshot.weekly]] as const) {
-			if (window.requests >= window.requestLimit || window.usedMicros + reservedMicros > window.limitMicros) {
-				throw new BudgetError(name, `Недостаточно лимита ${name === 'five_hour_limit' ? 'на 5 часов' : 'на неделю'} для этого запроса. Уменьшите контекст или дождитесь сброса.`, 429, window.resetsAt || undefined);
+		if (budget.limitsEnabled !== false) {
+			for (const [name, window] of [['five_hour_limit', snapshot.fiveHour], ['weekly_limit', snapshot.weekly]] as const) {
+				if (window.requests >= window.requestLimit || window.usedMicros + reservedMicros > window.limitMicros) {
+					throw new BudgetError(name, `Недостаточно лимита ${name === 'five_hour_limit' ? 'на 5 часов' : 'на неделю'} для этого запроса. Уменьшите контекст или дождитесь сброса.`, 429, window.resetsAt || undefined);
+				}
 			}
 		}
 		if (budget.balanceMicros < reservedMicros) {
-			throw new BudgetError('insufficient_budget', 'Недостаточно выданного бюджета API для этого запроса. Обратитесь к администратору.', 403);
+			throw new BudgetError('insufficient_budget', 'Недостаточно баланса для этого запроса. Пополните его в аккаунте.', 403);
 		}
 		const fiveHourStartedAt = snapshot.fiveHour.startedAt || now;
 		const weeklyStartedAt = snapshot.weekly.startedAt || now;
@@ -107,20 +110,22 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		// Free-model fallback preserves the zero tariff while recording the model that served it.
 		const billedModel = reservation.source === 'openrouter' && reservation.model.endsWith(':free') && servedModel?.endsWith(':free')
 			? servedModel : reservation.model;
-		const calculated = reservation.operation === 'image' ? reservation.reservedMicros
-			: usage ? usageCostMicros(usage, reservation.inputPerMillion, reservation.outputPerMillion,
-				reservation.cacheReadPerMillion ?? reservation.inputPerMillion, reservation.cacheWritePerMillion ?? reservation.inputPerMillion) : reservation.reservedMicros;
-		// OpenRouter reports actual USD cost; Bedrock uses the snapshotted catalog rates.
-		const actual = rejected ? 0 : usage?.cost !== undefined && reservation.source === 'openrouter'
-			? costMicros(1, 0, usage.cost * 1_000_000, 0) : calculated;
+		const percent = reservation.markupPercent || 0;
+		const catalog = usage ? usageCostMicros(usage, reservation.inputPerMillion, reservation.outputPerMillion,
+			reservation.cacheReadPerMillion ?? reservation.inputPerMillion, reservation.cacheWritePerMillion ?? reservation.inputPerMillion) : null;
+		// Provider cost stays unmarked. The reserve already includes the markup frozen on this row.
+		const providerActual = rejected ? 0
+			: reservation.operation === 'image' ? (reservation.unitPriceMicros ?? reservation.reservedMicros)
+			: usage?.cost !== undefined && reservation.source === 'openrouter' ? costMicros(1, 0, usage.cost * 1_000_000, 0)
+			: catalog ?? (percent <= 0 ? reservation.reservedMicros : Math.round(reservation.reservedMicros * 100 / (100 + percent)));
+		const actual = !rejected && reservation.operation !== 'image' && !usage ? reservation.reservedMicros : applyMarkup(providerActual, percent);
 		// Keep the wallet debit within the approved reservation even if upstream overbills.
-		// UsageLog still records the full provider cost.
 		const charged = wallet ? Math.min(reservation.reservedMicros, actual) : actual;
 		const refund = reservation.reservedMicros - charged;
 		const status = rejected ? 'refunded' : usage && (reservation.source !== 'openrouter' || usage.cost !== undefined) ? 'reported' : 'estimated';
 		const cacheUsage = { cacheReadTokens: usage?.prompt_tokens_details?.cached_tokens || 0,
 			cacheWriteTokens: usage?.prompt_tokens_details?.cache_creation_input_tokens || 0 };
-		await tx.budgetReservation.update({ where: { id }, data: { model: billedModel, status, costMicros: charged, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens, ...cacheUsage } });
+		await tx.budgetReservation.update({ where: { id }, data: { model: billedModel, status, costMicros: charged, providerCostMicros: providerActual, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens, ...cacheUsage } });
 		if (wallet && refund > 0) {
 			// A late refund reconciles the ledger but cannot be spent after expiresAt.
 			await tx.budgetWallet.update({ where: { id: wallet.id }, data: { balanceMicros: { increment: refund } } });
@@ -141,7 +146,7 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		}
 		if (!rejected) {
 			await tx.usageLog.create({ data: { userId: reservation.userId, model: billedModel, source: reservation.source, client: reservation.client,
-				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: actual, accounting: status,
+				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: charged, providerCostMicros: providerActual, markupPercent: percent, accounting: status,
 				costBasis: !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
 				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation, region: reservation.region,
 				inputPerMillion: reservation.inputPerMillion, outputPerMillion: reservation.outputPerMillion,

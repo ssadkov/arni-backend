@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 import prisma from '@/lib/prisma';
 import { BudgetError, reserveBudget, settleBudget } from './budget';
+import { applyMarkup, markupPercentFor } from './billingMarkup';
 import {
 	IMAGE_MODEL,
 	IMAGE_PRICE_MICROS,
@@ -96,7 +97,7 @@ export async function generateImage(userId: string, requestKey: string, body: un
 		);
 	}
 	// Budget is mandatory: free chat access never enables paid image generation.
-	if (!await prisma.accountBudget.findUnique({ where: { userId } })) { throw new BudgetError('image_budget_required', 'Для генерации изображений нужен выданный бюджет API.', 403); }
+	if (!await prisma.accountBudget.findUnique({ where: { userId } })) { throw new BudgetError('image_budget_required', 'Для генерации изображений пополните баланс в аккаунте.', 403); }
 	let row;
 	try {
 		row = await prisma.mediaGeneration.create({
@@ -112,7 +113,8 @@ export async function generateImage(userId: string, requestKey: string, body: un
 	let reservationId: string | undefined;
 	let dispatched = false;
 	try {
-		const reservation = await reserveBudget(userId, card.id, 'bedrock', card.costMicros, 0, 0, {
+		const markupPercent = await markupPercentFor({ source: 'bedrock', model: card.id, operation: 'image' });
+		const reservation = await reserveBudget(userId, card.id, 'bedrock', applyMarkup(card.costMicros, markupPercent), 0, 0, {
 			requestId: row.id,
 			requestedModel: card.id,
 			chatId,
@@ -121,6 +123,7 @@ export async function generateImage(userId: string, requestKey: string, body: un
 			unitPriceMicros: card.costMicros,
 			imageCount: 1,
 			client: app,
+			markupPercent,
 		});
 		reservationId = reservation.id;
 		await prisma.mediaGeneration.update({ where: { id: row.id }, data: { reservationId } });

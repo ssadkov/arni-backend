@@ -12,7 +12,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 	let body;
 	try { body = await req.json(); } catch { return NextResponse.json({ error: 'Некорректный запрос.' }, { status: 400 }); }
 	if (!body || typeof body !== 'object' || Array.isArray(body)) { return NextResponse.json({ error: 'Некорректный запрос.' }, { status: 400 }); }
-	const { key, grantUsd, fiveHourUsd, weeklyUsd, rubKopecks, rubRate, fiveHourRequests, weeklyRequests, days, enabled, note } = body;
+	const { key, grantUsd, fiveHourUsd, weeklyUsd, rubKopecks, rubRate, fiveHourRequests, weeklyRequests, days, enabled, limitsEnabled, note } = body;
 	const inRubles = rubKopecks !== undefined;
 	if (typeof key !== 'string' || !/^[a-zA-Z0-9-]{16,100}$/.test(key)
 		|| (inRubles
@@ -22,12 +22,13 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 			: ![grantUsd, fiveHourUsd, weeklyUsd].every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1000))
 		|| ![fiveHourRequests, weeklyRequests].every(value => Number.isSafeInteger(value) && value >= 1 && value <= 100000)
 		|| !Number.isSafeInteger(days) || days < 1 || days > 365 || typeof enabled !== 'boolean'
+		|| (limitsEnabled !== undefined && typeof limitsEnabled !== 'boolean')
 		|| typeof note !== 'string' || !note.trim() || note.length > 300) {
 		return NextResponse.json({ error: 'Проверьте сумму, лимиты, срок и основание начисления.' }, { status: 400 });
 	}
 	try {
 		const payloadHash = createHash('sha256').update(JSON.stringify({ id, grantUsd, fiveHourUsd, weeklyUsd, rubKopecks, rubRate: inRubles ? rubRate : undefined,
-			fiveHourRequests, weeklyRequests, days, enabled, note: note.trim() })).digest('hex');
+			fiveHourRequests, weeklyRequests, days, enabled, ...(typeof limitsEnabled === 'boolean' ? { limitsEnabled } : {}), note: note.trim() })).digest('hex');
 		const currentRubRate = inRubles ? (await billingRates()).RUB : null;
 		const result = await prisma.$transaction(async tx => {
 			// Locks both initial creation and subsequent grants. No user plan change is needed.
@@ -47,14 +48,16 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 				: [grantUsd, fiveHourUsd, weeklyUsd].map(usd => Math.round(usd * 1_000_000));
 			if ([grantMicros, fiveHourLimitMicros, weeklyLimitMicros].some(micros => micros > 1_000_000_000)) { throw new Error('balance_limit'); }
 			const config = { enabled, fiveHourLimitMicros, weeklyLimitMicros,
-				fiveHourRequestLimit: fiveHourRequests, weeklyRequestLimit: weeklyRequests };
+				fiveHourRequestLimit: fiveHourRequests, weeklyRequestLimit: weeklyRequests,
+				...(typeof limitsEnabled === 'boolean' ? { limitsEnabled } : {}) };
 			const validUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 			await tx.$queryRaw`SELECT "userId" FROM "AccountBudget" WHERE "userId" = ${id} FOR UPDATE`;
 			const previous = await tx.accountBudget.findUnique({ where: { userId: id } });
 			if ((previous?.balanceMicros || 0) + grantMicros > 1_000_000_000) { throw new Error('balance_limit'); }
+			const paidOpen = previous != null && previous.validUntil.getUTCFullYear() >= 2099;
 			const budget = await tx.accountBudget.upsert({ where: { userId: id },
 				create: { userId: id, ...config, validUntil, balanceMicros: grantMicros },
-				update: { ...config, ...(grantMicros > 0 ? { validUntil } : {}), balanceMicros: { increment: grantMicros } },
+				update: { ...config, ...(grantMicros > 0 && !paidOpen ? { validUntil } : {}), balanceMicros: { increment: grantMicros } },
 			});
 			const ledgerNote = inRubles ? `${note.trim()} · ${(rubKopecks[0] / 100).toFixed(2)} RUB · ${rubRate} RUB/USD` : note.trim();
 			await tx.budgetEntry.create({ data: { userId: id, key: entryKey, amountMicros: grantMicros, kind: 'grant', note: ledgerNote, payloadHash } });

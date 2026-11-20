@@ -96,6 +96,9 @@ model UsageLog {
   // web, arni, arni-code, or unknown. Empty on rows written before client accounting.
   client           String?
   costMicros       Int?
+  // What the provider charged, before markup. costMicros is the amount taken from the user.
+  providerCostMicros Int?
+  markupPercent    Int      @default(0)
   accounting       String? // reported, estimated, or legacy
   costBasis        String? // provider, catalog, reservation; separate from legacy token-balance accounting
   requestId        String? @unique
@@ -135,6 +138,8 @@ model AccountBudget {
   weeklyUsedMicros   Int      @default(0)
   fiveHourRequests   Int      @default(0)
   weeklyRequests     Int      @default(0)
+  // Paid top-ups keep the 5-hour and weekly caps unless an admin turns them off.
+  limitsEnabled      Boolean  @default(true)
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
@@ -159,9 +164,12 @@ model BudgetEntry {
   userId       String
   key          String   @unique // grant/payment/request idempotency key
   amountMicros Int
-  kind         String   // grant, reserve, refund, adjustment; future payment/subscription
+  kind         String   // grant, reserve, refund, adjustment, payment, payment_refund
   note         String
   payloadHash  String?
+  rubKopecks   Int?
+  rubPerUsd    Float?
+  externalId   String?
   createdAt    DateTime @default(now())
   walletId     String?
   user         User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -186,6 +194,8 @@ model BudgetReservation {
   imageCount      Int @default(0)
   status          String   @default("pending") // reported, estimated, refunded
   costMicros      Int?
+  providerCostMicros Int?
+  markupPercent   Int @default(0)
   promptTokens    Int?
   completionTokens Int?
   fiveHourStartedAt DateTime?
@@ -236,6 +246,42 @@ model BedrockModel {
   updatedAt            DateTime @updatedAt
 
   grants               UserModelAccess[]
+}
+
+// Markup percent applied on top of provider cost. 100 means the user pays twice the provider price.
+// id is global, provider:bedrock|openrouter|image, or model:<id>. The most specific row wins.
+// A missing global row means 100. Free :free models are never marked up.
+model BillingMarkup {
+  id        String   @id
+  percent   Int
+  updatedAt DateTime @updatedAt
+}
+
+// One Sheremetev invoice. idAccount is the CRM invoice id and the idempotency key.
+// Status 5 credits USD micros once. Status 6 removes that same credit once.
+model PaymentNotice {
+  idAccount      String   @id
+  userId         String
+  accountNumber  String?
+  idRate         String
+  accountStatus  String
+  status         String
+  amountKopecks  Int
+  currency       String   @default("RUB")
+  rubPerUsd      Float?
+  creditedMicros Int      @default(0)
+  paymentSystem  String?
+  provider       String?
+  email          String?
+  goods          Json?
+  dateOfOrder    DateTime?
+  dateOfPayment  DateTime?
+  eventAt        DateTime
+  testMode       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId, createdAt])
 }
 
 // Личное исключение. enabled=true открывает модель даже если она выключена для всех.

@@ -20,6 +20,7 @@ import { isModelAccessDenied, rememberRejected, rememberUnavailable, routeFreeMo
 import { chatIdHeader } from '@/lib/chatIdHeader';
 import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
 import { deepSeekBonus } from '@/lib/deepSeekBonus';
+import { applyMarkup, markupPercentFor } from '@/lib/billingMarkup';
 import { CONTEXT_ERROR_MESSAGE, isContextError } from '@/lib/llm/contextError';
 import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
 import { validUsage, withHost, type ReportedUsage } from '@/lib/budgetPolicy';
@@ -239,8 +240,9 @@ export async function POST(req: NextRequest) {
       const model = forcedBedrockModel || body.model;
       if (typeof model !== 'string' || !model) { throw new BudgetError('invalid_model', 'Выберите модель.', 400); }
       const price = await budgetPrice(body, provider, model);
-      const reservation = await reserveBudget(user.id, model, provider, price.reservedMicros, price.input, price.output,
-        { requestId, requestedModel, chatId, client, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined },
+      const markupPercent = bonusWallet ? 0 : await markupPercentFor({ source: provider, model, operation: 'chat' });
+      const reservation = await reserveBudget(user.id, model, provider, applyMarkup(price.reservedMicros, markupPercent), price.input, price.output,
+        { requestId, requestedModel, chatId, client, markupPercent, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined },
         bonusWallet?.id);
       budgetReservationId = reservation.id;
       // budgetPrice set a ceiling at the catalog price; DeepSeek keeps the test's routing (Wafer first) and reports its cost.
