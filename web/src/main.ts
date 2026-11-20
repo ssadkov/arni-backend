@@ -1,5 +1,5 @@
 import './style.css';
-import { billingSection, renderBilling, type BillingPayload, type BillingSection } from './billing';
+import { billingSection, renderBilling, toggleTariffSort, type BillingPayload, type BillingSection, type TariffSortKey } from './billing';
 import { captureDesktopRequest, pendingDesktopRequest, startDesktopApproval } from './desktopAuth';
 import { renderMarkdown } from './markdown';
 
@@ -258,6 +258,12 @@ function paintBilling(section: BillingSection) {
 async function onBillingClick(event: Event) {
   const target = event.target;
   if (!(target instanceof HTMLElement)) {
+    return;
+  }
+  const sortKey = target.closest<HTMLButtonElement>('[data-tariff-sort]')?.dataset.tariffSort;
+  if (sortKey === 'name' || sortKey === 'provider' || sortKey === 'output' || sortKey === 'input') {
+    toggleTariffSort(sortKey as TariffSortKey);
+    paintBilling('tariffs');
     return;
   }
   const selected = target.closest<HTMLButtonElement>('[data-billing-section]')?.dataset.billingSection;

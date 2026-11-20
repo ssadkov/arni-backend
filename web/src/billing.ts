@@ -5,12 +5,24 @@ export type BillingPayload = {
   entries: Array<{ id: string; kind: string; amountMicros: number; rubKopecks: number | null; note: string; createdAt: string }>;
   usage: Array<{ id: string; model: string; createdAt: string; costMicros: number | null; providerCostMicros: number | null; promptTokens: number; completionTokens: number }>;
   tariffs: Array<{
-    id: string; name: string; provider: string; percent: number;
-    input?: { provider: string; user: string } | null;
-    output?: { provider: string; user: string } | null;
-    unit?: { provider: string; user: string };
+    id: string; name: string; provider: string;
+    input: string | null; output: string | null;
+    inputAmount: number | null; outputAmount: number | null;
   }>;
 };
+
+export type TariffSortKey = 'name' | 'provider' | 'output' | 'input';
+
+const tariffSort: { key: TariffSortKey; dir: 'asc' | 'desc' } = { key: 'name', dir: 'asc' };
+
+export function toggleTariffSort(key: TariffSortKey) {
+  if (tariffSort.key === key) {
+    tariffSort.dir = tariffSort.dir === 'asc' ? 'desc' : 'asc';
+    return;
+  }
+  tariffSort.key = key;
+  tariffSort.dir = 'asc';
+}
 
 const SECTIONS = [
   ['topup', 'Пополнить'],
@@ -28,6 +40,36 @@ export function billingSection(hash: string): BillingSection | null {
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char] || char));
+}
+
+const TARIFF_COLUMNS: Array<[TariffSortKey, string]> = [
+  ['name', 'Модель'],
+  ['provider', 'Провайдер'],
+  ['output', 'Исходящие'],
+  ['input', 'Входящие'],
+];
+
+function tariffTable(rows: BillingPayload['tariffs']) {
+  const direction = tariffSort.dir === 'asc' ? 1 : -1;
+  const sorted = [...rows].sort((left, right) => {
+    const key = tariffSort.key;
+    if (key === 'name' || key === 'provider') {
+      return left[key].localeCompare(right[key], 'ru') * direction;
+    }
+    const leftAmount = left[key === 'output' ? 'outputAmount' : 'inputAmount'];
+    const rightAmount = right[key === 'output' ? 'outputAmount' : 'inputAmount'];
+    if (leftAmount == null && rightAmount == null) { return 0; }
+    if (leftAmount == null) { return 1; }
+    if (rightAmount == null) { return -1; }
+    return (leftAmount - rightAmount) * direction;
+  });
+  const head = TARIFF_COLUMNS.map(([key, label]) => {
+    const active = tariffSort.key === key;
+    const mark = active ? (tariffSort.dir === 'asc' ? ' ↑' : ' ↓') : '';
+    return `<th aria-sort="${active ? (tariffSort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"><button type="button" data-tariff-sort="${key}">${label}${mark}</button></th>`;
+  }).join('');
+  const body = sorted.map(row => `<tr><td>${escapeHtml(row.name)}</td><td>${escapeHtml(row.provider)}</td><td>${escapeHtml(row.output ?? '—')}</td><td>${escapeHtml(row.input ?? '—')}</td></tr>`).join('');
+  return `<p class="muted">Цены за 1 млн токенов. Для изображений цена за одну картинку стоит в столбце «Исходящие».</p><div class="billing-table-wrap"><table class="billing-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function rub(micros: number, rate: number | null) {
@@ -61,7 +103,7 @@ export function renderBilling(payload: BillingPayload, section: BillingSection) 
   } else if (section === 'expenses') {
     body += payload.usage.length === 0 ? '<p class="muted">Расходов пока нет.</p>' : `<ul class="billing-list">${payload.usage.map(row => `<li><span>${escapeHtml(row.model)}</span><strong>${row.costMicros == null ? '—' : rub(row.costMicros, rate)}</strong><small>${row.providerCostMicros == null ? '' : `себестоимость ${rub(row.providerCostMicros, rate)} · `}${escapeHtml(when(row.createdAt))}</small></li>`).join('')}</ul>`;
   } else {
-    body += `<ul class="billing-list">${payload.tariffs.map(row => `<li><span>${escapeHtml(row.name)} <small>${escapeHtml(row.provider)}, наценка ${row.percent}%</small></span><strong>${row.unit ? row.unit.user : `${row.input?.user ?? '—'} / ${row.output?.user ?? '—'}`}</strong><small>${row.unit ? `себестоимость ${row.unit.provider}` : `себестоимость ${row.input?.provider ?? '—'} / ${row.output?.provider ?? '—'}`}</small></li>`).join('')}</ul>`;
+    body += tariffTable(payload.tariffs);
   }
   return `<div class="billing-tabs">${tabs}</div><div class="billing-panel">${body}<p id="billing-status" class="muted"></p></div>`;
 }

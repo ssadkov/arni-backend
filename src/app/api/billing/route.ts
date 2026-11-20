@@ -3,13 +3,39 @@ import prisma from '@/lib/prisma';
 import { BudgetError, budgetSnapshot } from '@/lib/budget';
 import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 import { checkoutConfigured } from '@/lib/billingPayment';
-import { markedPerMillion, markupTable, percentFromTable } from '@/lib/billingMarkup';
+import { applyMarkup, markedPerMillion, markupTable, percentFromTable } from '@/lib/billingMarkup';
 import { IMAGE_MODELS } from '@/lib/imageModels';
 import { modelsAllowedForUser } from '@/lib/llm/bedrockAccess';
+import { routerCatalog } from '@/lib/llm/openRouterCatalog';
+import { PAID_DEEPSEEK_MODEL } from '@/lib/llm/trialModel';
 import { webJson, webOptions } from '@/lib/webCors';
 import { webUser } from '@/lib/webSession';
 
 export const dynamic = 'force-dynamic';
+
+/** Paid DeepSeek is billed from the account budget at the OpenRouter price plus markup. Catalog failure leaves the other rows. */
+async function openRouterTariffs(markups: Map<string, number>, rubRate: number | null) {
+	try {
+		const row = (await routerCatalog()).find(model => model.id === PAID_DEEPSEEK_MODEL);
+		const prompt = Number(row?.pricing?.prompt);
+		const completion = Number(row?.pricing?.completion);
+		if (!row || !Number.isFinite(prompt) || !Number.isFinite(completion)) { return []; }
+		const percent = percentFromTable(markups, { source: 'openrouter', model: row.id });
+		const price = (perToken: number) => {
+			const amount = Math.round(markedPerMillion(perToken * 1_000_000, percent) * 1_000_000);
+			return { text: formatBillingRub(amount, rubRate), amount };
+		};
+		const input = price(prompt);
+		const output = price(completion);
+		return [{
+			id: row.id, name: row.name, provider: 'OpenRouter',
+			input: input.text, output: output.text, inputAmount: input.amount, outputAmount: output.amount,
+		}];
+	} catch (error) {
+		console.error('OpenRouter tariff is unavailable:', error instanceof Error ? error.name : 'unknown');
+		return [];
+	}
+}
 
 export function OPTIONS(req: NextRequest) {
 	return webOptions(req);
@@ -33,20 +59,25 @@ export async function GET(req: NextRequest) {
 			}),
 			modelsAllowedForUser(user.id),
 		]);
-		const price = (perMillion: number | null, percent: number) => perMillion == null ? null : {
-			provider: formatBillingRub(perMillion * 1_000_000, rates.RUB),
-			user: formatBillingRub(markedPerMillion(perMillion, percent) * 1_000_000, rates.RUB),
+		const tokenPrice = (perMillion: number, percent: number) => {
+			const amount = Math.round(markedPerMillion(perMillion, percent) * 1_000_000);
+			return { text: formatBillingRub(amount, rates.RUB), amount };
 		};
 		const tariffs = [
 			...models.filter(model => model.inputPerMillion != null && model.outputPerMillion != null).map(model => {
 				const percent = percentFromTable(markups, { source: 'bedrock', model: model.id });
-				return { id: model.id, name: model.name, provider: 'Bedrock', percent, input: price(model.inputPerMillion, percent), output: price(model.outputPerMillion, percent) };
+				const input = tokenPrice(model.inputPerMillion!, percent);
+				const output = tokenPrice(model.outputPerMillion!, percent);
+				return { id: model.id, name: model.name, provider: 'Bedrock', input: input.text, output: output.text, inputAmount: input.amount, outputAmount: output.amount };
 			}),
+			...await openRouterTariffs(markups, rates.RUB),
 			...IMAGE_MODELS.map(model => {
 				const percent = percentFromTable(markups, { source: 'bedrock', model: model.id, operation: 'image' });
-				return { id: model.id, name: model.name, provider: 'Изображения', percent, unit: {
-					provider: formatBillingRub(model.costMicros, rates.RUB), user: formatBillingRub(Math.round(model.costMicros * (100 + percent) / 100), rates.RUB),
-				} };
+				const amount = applyMarkup(model.costMicros, percent);
+				return {
+					id: model.id, name: model.name, provider: 'Изображения',
+					input: null, output: formatBillingRub(amount, rates.RUB), inputAmount: null, outputAmount: amount,
+				};
 			}),
 		];
 		return webJson(req, {
