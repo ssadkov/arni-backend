@@ -3,7 +3,7 @@
 import { useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 
-type BudgetConfig = { enabled: boolean; fiveHourLimitMicros: number; weeklyLimitMicros: number; fiveHourRequestLimit: number; weeklyRequestLimit: number };
+type BudgetConfig = { enabled: boolean; limitsEnabled?: boolean; fiveHourLimitMicros: number; weeklyLimitMicros: number; fiveHourRequestLimit: number; weeklyRequestLimit: number };
 
 export default function UserBudget({ userId, budget, rubRate }: { userId: string; budget: BudgetConfig | null; rubRate: number | null }) {
 	const router = useRouter();
@@ -21,7 +21,8 @@ export default function UserBudget({ userId, budget, rubRate }: { userId: string
 			? { rubRate, rubKopecks: [grant, fiveHour, weekly].map(amount => Math.round(amount * 100)) }
 			: { grantUsd: grant, fiveHourUsd: fiveHour, weeklyUsd: weekly };
 		const payload = JSON.stringify({ ...amounts, fiveHourRequests: Number(form.get('fiveHourRequests')),
-			weeklyRequests: Number(form.get('weeklyRequests')), days: Number(form.get('days')), enabled: form.get('enabled') === 'on', note: form.get('note') });
+			weeklyRequests: Number(form.get('weeklyRequests')), days: Number(form.get('days')), enabled: form.get('enabled') === 'on',
+			limitsEnabled: form.get('limitsEnabled') === 'on', note: form.get('note') });
 		if (!pending.current || pending.current.payload !== payload) { pending.current = { key: crypto.randomUUID(), payload }; }
 		setBusy(true);
 		setMessage('');
@@ -52,6 +53,7 @@ export default function UserBudget({ userId, budget, rubRate }: { userId: string
 			<label className="text-sm">Срок от начисления, дней<input name="days" type="number" min="1" max="365" defaultValue={30} required className="block border rounded-md p-2 w-full" /></label>
 			<label className="text-sm sm:col-span-2">Основание<input name="note" maxLength={300} defaultValue="Внутренний тест сотрудника" required className="block border rounded-md p-2 w-full" /></label>
 			<label className="text-sm flex items-center gap-2"><input name="enabled" type="checkbox" defaultChecked={budget?.enabled ?? true} />Доступ включён</label>
+			<label className="text-sm flex items-center gap-2"><input name="limitsEnabled" type="checkbox" defaultChecked={budget?.limitsEnabled ?? true} />Лимиты 5 часов и недели</label>
 		</fieldset>
 		<p className="text-xs text-gray-500">Для изменения лимитов без начисления оставьте сумму 0. Начисление продлевает доступ на выбранный срок от текущего момента и сохраняет остаток. Автопродления нет.</p>
 		<button type="submit" disabled={busy} className="bg-indigo-600 text-white px-4 py-2 rounded-md disabled:opacity-50">{busy ? 'Сохранение…' : 'Сохранить доступ'}</button>

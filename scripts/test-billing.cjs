@@ -378,6 +378,34 @@ async function main() {
 			{ totalMicros: null, requestCount: 1, pricedRequests: 0 },
 		]);
 	});
+	await check('payment notice credits once, removes expiry, and refunds the same dollars', async () => {
+		process.env.BILLING_CHECKOUT_PRODUCT_TOPUP = '9001';
+		process.env.ARNI_USD_TO_RUB = '100';
+		const payer = await prisma.user.create({ data: { email: `payer-${randomUUID()}@billing-test.invalid` } });
+		const { handlePaymentNotice } = require('../src/lib/billingPayment.ts');
+		const notice = { idAccount: `acct-${payer.id}`, idLogicliftUser: payer.id, idRate: '9001', accountStatus: '5', accountSum: '100.00', currency: 'RUB' };
+		assert.equal((await handlePaymentNotice(notice, 100)).created, true);
+		assert.equal((await handlePaymentNotice(notice, 100)).created, false);
+		const budget = await prisma.accountBudget.findUniqueOrThrow({ where: { userId: payer.id } });
+		assert.equal(budget.balanceMicros, 1_000_000);
+		assert.ok(budget.validUntil.getUTCFullYear() >= 2099);
+		await handlePaymentNotice({ ...notice, accountStatus: '6' }, 100);
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId: payer.id } })).balanceMicros, 0);
+		await handlePaymentNotice({ ...notice, accountStatus: '6' }, 100);
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId: payer.id } })).balanceMicros, 0);
+	});
+	await check('frozen markup doubles the provider cost and leaves the provider amount beside it', async () => {
+		const marked = await prisma.user.create({ data: { email: `markup-${randomUUID()}@billing-test.invalid` } });
+		await prisma.accountBudget.create({ data: { userId: marked.id, balanceMicros: 100_000, validUntil: new Date(Date.now() + 86400000) } });
+		const row = await reserveBudget(marked.id, 'marked', 'openrouter', 20_000, 3, 15, { markupPercent: 100 });
+		await settleBudget(row.id, { prompt_tokens: 1, completion_tokens: 1, cost: 0.01 });
+		const settled = await prisma.budgetReservation.findUniqueOrThrow({ where: { id: row.id } });
+		assert.equal(settled.providerCostMicros, 10_000);
+		assert.equal(settled.costMicros, 20_000);
+		const log = await prisma.usageLog.findFirstOrThrow({ where: { userId: marked.id, model: 'marked' } });
+		assert.equal(log.providerCostMicros, 10_000);
+		assert.equal(log.costMicros, 20_000);
+	});
 	console.log(`${passed} billing checks passed on disposable PostgreSQL.`);
 }
 main().catch(error => { console.error(error); process.exitCode = 1; }).finally(() => prisma.$disconnect());

@@ -1,4 +1,5 @@
 import './style.css';
+import { billingSection, renderBilling, type BillingPayload, type BillingSection } from './billing';
 import { captureDesktopRequest, pendingDesktopRequest, startDesktopApproval } from './desktopAuth';
 import { renderMarkdown } from './markdown';
 
@@ -19,11 +20,13 @@ type Account = {
   budget?: {
     enabled: boolean;
     expired: boolean;
+    limitsEnabled?: boolean;
     balanceMicros: number;
     validUntil: string;
     fiveHour: BudgetWindow;
     weekly: BudgetWindow;
   } | null;
+  billingRates?: { RUB: number | null };
 };
 type Model = {
   id: string;
@@ -87,6 +90,14 @@ function icon(name: keyof typeof icons) {
 
 function usd(micros: number) {
   return `$${(micros / 1_000_000).toFixed(2)}`;
+}
+
+function money(micros: number) {
+  const rate = account?.billingRates?.RUB;
+  if (!rate) {
+    return usd(micros);
+  }
+  return new Intl.NumberFormat('ru-RU', { style: 'currency', currency: 'RUB', maximumFractionDigits: 2 }).format(micros / 1_000_000 * rate);
 }
 
 function escapeHtml(value: string) {
@@ -208,10 +219,83 @@ async function enterApp() {
     return;
   }
   renderApp();
+  openHashedBilling();
   void refreshChats();
   void refreshModels();
   void refreshImageConfig();
 }
+
+let billingPayload: BillingPayload | null = null;
+
+async function showBilling(section: BillingSection) {
+  document.querySelector<HTMLDialogElement>('#account-dialog')?.close();
+  const dialog = document.querySelector<HTMLDialogElement>('#billing-dialog');
+  const body = document.querySelector('#billing-body');
+  if (!dialog || !body) {
+    return;
+  }
+  dialog.showModal();
+  if (!billingPayload) {
+    body.innerHTML = '<p class="muted">Загрузка…</p>';
+    const response = await api('/api/billing');
+    if (!response.ok) {
+      body.innerHTML = `<p class="error">${escapeHtml(await errorMessage(response))}</p>`;
+      return;
+    }
+    billingPayload = await response.json() as BillingPayload;
+  }
+  paintBilling(section);
+}
+
+function paintBilling(section: BillingSection) {
+  const body = document.querySelector('#billing-body');
+  if (!body || !billingPayload) {
+    return;
+  }
+  body.innerHTML = renderBilling(billingPayload, section);
+}
+
+async function onBillingClick(event: Event) {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) {
+    return;
+  }
+  const selected = target.closest<HTMLButtonElement>('[data-billing-section]')?.dataset.billingSection;
+  const section = selected ? billingSection(selected) : null;
+  if (section) {
+    paintBilling(section);
+    return;
+  }
+  if (!target.closest('#start-checkout')) {
+    return;
+  }
+  const status = document.querySelector('#billing-status');
+  if (status) {
+    status.textContent = 'Открываем оплату…';
+  }
+  const response = await api('/api/billing/checkout');
+  const payload = await response.json().catch(() => null) as { url?: string; error?: string } | null;
+  if (!response.ok || !payload?.url?.startsWith('https://')) {
+    if (status) {
+      status.textContent = typeof payload?.error === 'string' ? payload.error : 'Не удалось открыть оплату.';
+    }
+    return;
+  }
+  location.assign(payload.url);
+}
+
+function openHashedBilling() {
+  const section = billingSection(location.hash);
+  if (section) {
+    void showBilling(section);
+  }
+}
+
+window.addEventListener('hashchange', () => {
+  if (token) {
+    openHashedBilling();
+  }
+});
 
 const YANDEX_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="12" fill="#FC3F1D"/><path fill="#fff" d="M13.32 7.67h-.93c-1.7 0-2.6.86-2.6 2.13 0 1.44.62 2.11 1.89 2.97l1.05.7-3.02 4.52H7.45l2.72-4.04c-1.56-1.12-2.44-2.2-2.44-4.04 0-2.3 1.6-3.87 4.65-3.87h3.03v11.95h-2.09V7.67z"/></svg>';
 const VK_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6" fill="#0077FF"/><path fill="#fff" d="M12.77 17.29c-5.2 0-8.17-3.56-8.29-9.49h2.6c.09 4.35 2.01 6.19 3.53 6.57V7.8h2.45v3.75c1.5-.16 3.08-1.87 3.61-3.75h2.45c-.41 2.32-2.11 4.03-3.32 4.73 1.21.57 3.15 2.05 3.89 4.76h-2.7c-.58-1.81-2.03-3.21-3.93-3.4v3.4h-.29z"/></svg>';
@@ -238,12 +322,12 @@ function limitsHtml() {
   if (!budget) {
     return `<div><strong>${escapeHtml(account.email)}</strong><dl><div><dt>Бесплатные шаги</dt><dd>${account.freeSteps.remaining} из ${account.freeSteps.limit}</dd></div></dl></div>`;
   }
-  const windowLine = (title: string, window: BudgetWindow) => `<div><dt>${title}</dt><dd>${usd(window.usedMicros)} / ${usd(window.limitMicros)} · ${window.requests}/${window.requestLimit}</dd></div>`;
+  const windowLine = (title: string, window: BudgetWindow) => `<div><dt>${title}</dt><dd>${money(window.usedMicros)} / ${money(window.limitMicros)} · ${window.requests}/${window.requestLimit}</dd></div>`;
   const state = !budget.enabled || budget.expired ? '<p class="error">Доступ приостановлен или срок истёк.</p>' : '';
+  const term = new Date(budget.validUntil).getUTCFullYear() >= 2099 ? 'без срока' : `до ${escapeHtml(budget.validUntil.slice(0, 10))}`;
   return `<div><strong>${escapeHtml(account.email)}</strong>${state}<dl>
-    <div><dt>Бюджет</dt><dd>${usd(Math.max(0, budget.balanceMicros))} до ${escapeHtml(budget.validUntil.slice(0, 10))}</dd></div>
-    ${windowLine('5 часов', budget.fiveHour)}
-    ${windowLine('7 дней', budget.weekly)}
+    <div><dt>Бюджет</dt><dd>${money(Math.max(0, budget.balanceMicros))} ${term}</dd></div>
+    ${budget.limitsEnabled === false ? '' : `${windowLine('5 часов', budget.fiveHour)}${windowLine('7 дней', budget.weekly)}`}
   </dl></div>`;
 }
 
@@ -253,7 +337,7 @@ function accountSummary() {
   }
   const { budget, freeSteps } = account;
   if (budget?.enabled && !budget.expired) {
-    return `Баланс ${usd(Math.max(0, budget.balanceMicros))}`;
+    return `Баланс ${money(Math.max(0, budget.balanceMicros))}`;
   }
   return freeSteps ? `Бесплатные шаги · ${freeSteps.remaining} из ${freeSteps.limit}` : '';
 }
@@ -362,11 +446,24 @@ function renderApp() {
       </div>
       <div class="account-content">
         <div class="limits" id="limits">${limitsHtml()}</div>
+        <div class="billing-links">
+          <button id="show-topup" type="button">Пополнить</button>
+          <button id="show-payments" type="button">Пополнения</button>
+          <button id="show-expenses" type="button">Расходы</button>
+          <button id="show-tariffs" type="button">Тарифы</button>
+        </div>
         <div class="actions">
           <button id="show-memory" type="button">Память</button>
           <button id="sign-out" type="button">Выйти</button>
         </div>
       </div>
+    </dialog>
+    <dialog id="billing-dialog" aria-labelledby="billing-heading">
+      <div class="dialog-header">
+        <h2 id="billing-heading">Биллинг</h2>
+        <form method="dialog"><button class="icon-button" aria-label="Закрыть">${icon('close')}</button></form>
+      </div>
+      <div class="account-content" id="billing-body"></div>
     </dialog>
     <dialog id="memory-dialog" aria-labelledby="memory-heading">
       <form method="dialog" class="memory-form">
@@ -384,6 +481,10 @@ function renderApp() {
   document.querySelector('#sign-out')?.addEventListener('click', signOut);
   document.querySelector('#new-chat')?.addEventListener('click', newChat);
   document.querySelector('#show-account')?.addEventListener('click', () => document.querySelector<HTMLDialogElement>('#account-dialog')?.showModal());
+  for (const section of ['topup', 'payments', 'expenses', 'tariffs'] as const) {
+    document.querySelector(`#show-${section}`)?.addEventListener('click', () => { void showBilling(section); });
+  }
+  document.querySelector('#billing-body')?.addEventListener('click', event => { void onBillingClick(event); });
   document.querySelector('#show-memory')?.addEventListener('click', () => void openMemory());
   document.querySelector('#save-memory')?.addEventListener('click', () => void saveMemory());
   document.querySelector('#show-chats')?.addEventListener('click', () => setChatsOpen(true));
