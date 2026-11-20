@@ -4,6 +4,8 @@ import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 import { freeStepSnapshot } from '@/lib/freeSteps';
 import ProviderSelect from './ProviderSelect';
 import UserActions from './UserActions';
+import DeepSeekBonusGrant from './DeepSeekBonusGrant';
+import { deepSeekBonusReport } from '@/lib/deepSeekBonus';
 import type { Prisma } from '@prisma/client';
 
 export const dynamic = 'force-dynamic';
@@ -13,6 +15,7 @@ export default async function UsersPage() {
   let dbError = false;
   const spentByUser = new Map<string, number>();
   const ratesPromise = billingRates();
+  const reportPromise = deepSeekBonusReport().catch(() => null);
 
   try {
     const [found, spend] = await Promise.all([
@@ -33,7 +36,8 @@ export default async function UsersPage() {
   } catch {
     dbError = true;
   }
-  const rates = await ratesPromise;
+  const [rates, bonus] = await Promise.all([ratesPromise, reportPromise]);
+  const money = (micros: number) => formatBillingRub(micros, rates.RUB);
 
   return (
     <div className="space-y-6">
@@ -43,6 +47,13 @@ export default async function UsersPage() {
           + Добавить вручную
         </button>
       </div>
+
+      {bonus ? <div className="bg-white rounded-xl border border-gray-100 p-4 space-y-2">
+        <h3 className="font-semibold">Бонус DeepSeek</h3>
+        <p className="text-sm text-gray-600">Начислено {money(bonus.grantedMicros)} · Потрачено {money(bonus.spentMicros)} · Доступный остаток {money(bonus.remainingMicros)}</p>
+        <p className="text-sm text-gray-600">Использовали {bonus.spendingAccounts} из {bonus.accounts} · Себестоимость бонусной части {money(bonus.providerMicros)}</p>
+        <DeepSeekBonusGrant />
+      </div> : null}
 
       {dbError && (
         <div className="bg-red-50 border-l-4 border-red-500 p-4 text-red-700">

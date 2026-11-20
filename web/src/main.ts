@@ -14,6 +14,15 @@ type Hit = { title: string; url: string; snippet: string };
 type ImageRef = { id: string; mediaType: string };
 type Message = { id: string; role: string; text: string; status: string; sources: Hit[]; images: ImageRef[] };
 type BudgetWindow = { usedMicros: number; limitMicros: number; requests: number; requestLimit: number; resetsAt: string | null };
+type Bonus = {
+  models: string[];
+  balanceMicros: number;
+  grantedMicros: number;
+  expiresAt: string;
+  expired: boolean;
+  fiveHour: { remainingMicros: number };
+  weekly: { remainingMicros: number };
+};
 type Account = {
   email: string;
   freeSteps: { remaining: number; limit: number; resetsAt: string };
@@ -25,6 +34,7 @@ type Account = {
     validUntil: string;
     fiveHour: BudgetWindow;
     weekly: BudgetWindow;
+    bonus?: Bonus | null;
   } | null;
   billingRates?: { RUB: number | null };
 };
@@ -34,6 +44,7 @@ type Model = {
   arni_default?: boolean;
   arni_free?: boolean;
   arni_provider?: string;
+  arni_bonus?: { balanceMicros: number; expiresAt: string };
   architecture?: { input_modalities?: string[] };
 };
 type ImageGenModel = {
@@ -329,12 +340,36 @@ function limitsHtml() {
     return `<div><strong>${escapeHtml(account.email)}</strong><dl><div><dt>Бесплатные шаги</dt><dd>${account.freeSteps.remaining} из ${account.freeSteps.limit}</dd></div></dl></div>`;
   }
   const windowLine = (title: string, window: BudgetWindow) => `<div><dt>${title}</dt><dd>${money(window.usedMicros)} / ${money(window.limitMicros)} · ${window.requests}/${window.requestLimit}</dd></div>`;
-  const state = !budget.enabled || budget.expired ? '<p class="error">Доступ приостановлен или срок истёк.</p>' : '';
+  const state = !budget.enabled ? '<p class="error">Доступ приостановлен.</p>'
+    : budget.expired ? '<p class="error">Срок основного доступа истёк.</p>' : '';
   const term = new Date(budget.validUntil).getUTCFullYear() >= 2099 ? 'без срока' : `до ${escapeHtml(budget.validUntil.slice(0, 10))}`;
   return `<div><strong>${escapeHtml(account.email)}</strong>${state}<dl>
     <div><dt>Бюджет</dt><dd>${money(Math.max(0, budget.balanceMicros))} ${term}</dd></div>
+    ${budget.bonus ? `<div><dt>Бонус DeepSeek</dt><dd>${escapeHtml(bonusSummary())}</dd></div>` : ''}
+    ${budget.bonus && activeBonus(budget.bonus) && budget.enabled
+      ? `<div><dt>Доступно из бонуса</dt><dd>${money(budget.bonus.fiveHour.remainingMicros)} на 5 ч · ${money(budget.bonus.weekly.remainingMicros)} на неделю</dd></div>
+         <div><dt>Оплата DeepSeek</dt><dd>Сначала из бонуса, затем из основного баланса</dd></div>` : ''}
     ${budget.limitsEnabled === false ? '' : `${windowLine('5 часов', budget.fiveHour)}${windowLine('7 дней', budget.weekly)}`}
   </dl></div>`;
+}
+
+function activeBonus(bonus: Bonus) {
+  return !bonus.expired && new Date() < new Date(bonus.expiresAt) && bonus.balanceMicros > 0;
+}
+
+function bonusSummary() {
+  const budget = account?.budget;
+  const bonus = budget?.bonus;
+  if (!bonus) return '';
+  if (bonus.expired || Date.now() >= Date.parse(bonus.expiresAt)) return 'срок истёк';
+  if (!budget.enabled) return 'приостановлен';
+  const date = new Date(bonus.expiresAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'Asia/Almaty' });
+  return `${money(bonus.balanceMicros)} из ${money(bonus.grantedMicros)} · до ${date} включительно`;
+}
+
+function modelName(model: Model) {
+  const name = model.name || model.id;
+  return model.arni_bonus ? name.replace(/ · бонус \$[\d.]+ до \d{2}\.\d{2}$/, '') : name;
 }
 
 function accountSummary() {
@@ -387,6 +422,7 @@ function renderApp() {
           <span class="account-details">
             <span class="account-name">${escapeHtml(account?.email || 'Аккаунт')}</span>
             <span class="account-summary" id="account-summary">${escapeHtml(accountSummary())}</span>
+            <span class="account-summary account-bonus" id="account-bonus">${account?.budget?.bonus ? escapeHtml(`Бонус DeepSeek · ${bonusSummary()}`) : ''}</span>
           </span>${icon('chevron')}
         </button>
       </aside>
@@ -587,6 +623,11 @@ function paintLimits() {
   if (summary) {
     summary.textContent = accountSummary();
   }
+  const bonus = document.querySelector('#account-bonus');
+  if (bonus) {
+    const text = bonusSummary();
+    bonus.textContent = text ? `Бонус DeepSeek · ${text}` : '';
+  }
 }
 
 async function openMemory() {
@@ -637,7 +678,7 @@ function paintModels() {
   }
   const current = selectedModel();
   const chosen = models.find(model => model.id === current);
-  label.textContent = chosen ? chosen.name || chosen.id : 'Выбрать модель';
+  label.textContent = chosen ? modelName(chosen) : 'Выбрать модель';
   const trigger = document.querySelector<HTMLButtonElement>('#show-models')!;
   trigger.title = label.textContent;
   trigger.setAttribute('aria-label', chosen ? `Выбрать модель. Сейчас выбрана ${label.textContent}` : 'Выбрать модель');
@@ -659,10 +700,12 @@ function paintModels() {
     { title: 'Бесплатные', models: matching.filter(model => model.arni_free === true) },
     { title: 'Модели по бюджету', models: matching.filter(model => model.arni_free !== true) },
   ];
+  const bonus = account?.budget?.bonus;
+  const showBonus = account?.budget?.enabled && bonus && activeBonus(bonus);
   list.innerHTML = groups.filter(group => group.models.length).map(group => `<section class="model-group">
     <h3>${group.title}</h3>
     ${group.models.map(model => `<button type="button" class="model-option" data-model="${escapeHtml(model.id)}" aria-pressed="${model.id === current}">
-      <span><strong>${escapeHtml(model.name || model.id)}</strong><small>${escapeHtml(model.arni_provider === 'bedrock' ? 'Amazon Bedrock' : model.arni_provider === 'openrouter' ? 'OpenRouter' : model.id)}${supportsImage(model) ? ' · Изображения' : ''}</small></span>
+      <span><strong>${escapeHtml(modelName(model))}</strong><small>${escapeHtml(model.arni_provider === 'bedrock' ? 'Amazon Bedrock' : model.arni_provider === 'openrouter' ? 'OpenRouter' : model.id)}${supportsImage(model) ? ' · Изображения' : ''}${showBonus && bonus.models.includes(model.id) ? ' · Бонус' : ''}</small></span>
       ${model.id === current ? icon('check') : ''}
     </button>`).join('')}
   </section>`).join('');
@@ -1084,7 +1127,7 @@ async function send(draw: boolean) {
     paintComposer();
     paintChats();
     void refreshChats();
-    void refreshAccount().then(paintLimits).catch(() => undefined);
+    void refreshAccount().then(() => { paintLimits(); paintModels(); }).catch(() => undefined);
   }
 }
 

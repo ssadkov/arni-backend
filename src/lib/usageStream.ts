@@ -1,7 +1,7 @@
 import { UsageParser, type ReportedUsage } from './budgetPolicy';
 
 /** Drain upstream even after client cancellation so billed usage can be reconciled. */
-export function usageStream(body: ReadableStream<Uint8Array>, settle: (usage: ReportedUsage | null) => Promise<void>) {
+export function usageStream(body: ReadableStream<Uint8Array>, settle: (usage: ReportedUsage | null, generationId?: string) => Promise<void>) {
 	const parser = new UsageParser();
 	let cancelled = false;
 	let complete!: () => void;
@@ -18,7 +18,7 @@ export function usageStream(body: ReadableStream<Uint8Array>, settle: (usage: Re
 					parser.push(value);
 					if (parser.done && !settlement) {
 						// OpenAI clients can finish as soon as they see [DONE] and read the chat total immediately.
-						settlement = settle(parser.usage);
+						settlement = settle(parser.usage, parser.generationId);
 						await settlement;
 					}
 					if (!cancelled) { controller.enqueue(value); }
@@ -28,7 +28,7 @@ export function usageStream(body: ReadableStream<Uint8Array>, settle: (usage: Re
 				failed = true;
 			} finally {
 				try {
-					await (settlement ?? settle(parser.usage));
+					await (settlement ?? settle(parser.usage, parser.generationId));
 					if (!cancelled) {
 						if (failed) { controller.error(new Error('Поток модели прерван. Расход учтён.')); }
 						else { controller.close(); }

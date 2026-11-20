@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/adminAuth';
 import prisma from '@/lib/prisma';
 import { budgetSnapshot } from '@/lib/budget';
+import { grantDeepSeekBonus, readDeepSeekBonus } from '@/lib/deepSeekBonus';
 import { createHash } from 'node:crypto';
 import { billingRates } from '@/lib/billingCurrency';
 
@@ -32,7 +33,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 		const currentRubRate = inRubles ? (await billingRates()).RUB : null;
 		const result = await prisma.$transaction(async tx => {
 			// Locks both initial creation and subsequent grants. No user plan change is needed.
-			const users = await tx.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "User" WHERE "id" = ${id} FOR UPDATE`;
+			const users = await tx.$queryRaw<Array<{ id: string; isBanned: boolean }>>`SELECT "id", "isBanned" FROM "User" WHERE "id" = ${id} FOR NO KEY UPDATE`;
 			if (!users.length) { return null; }
 			const entryKey = `grant:${key}`;
 			const existing = await tx.budgetEntry.findUnique({ where: { key: entryKey } });
@@ -61,10 +62,11 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 			});
 			const ledgerNote = inRubles ? `${note.trim()} · ${(rubKopecks[0] / 100).toFixed(2)} RUB · ${rubRate} RUB/USD` : note.trim();
 			await tx.budgetEntry.create({ data: { userId: id, key: entryKey, amountMicros: grantMicros, kind: 'grant', note: ledgerNote, payloadHash } });
+			if (grantMicros > 0 && budget.enabled && !users[0].isBanned) { await grantDeepSeekBonus(tx, id); }
 			return budget;
 		});
 		if (!result) { return NextResponse.json({ error: 'Пользователь не найден.' }, { status: 404 }); }
-		return NextResponse.json({ budget: budgetSnapshot(result) });
+		return NextResponse.json({ budget: budgetSnapshot(result, new Date(), await readDeepSeekBonus(id)) });
 	} catch (error) {
 		if (error instanceof Error && error.message === 'rate_changed') {
 			return NextResponse.json({ error: 'Курс изменился. Обновите страницу перед начислением.' }, { status: 409 });

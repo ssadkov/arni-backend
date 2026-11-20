@@ -147,6 +147,7 @@ button.primary:hover:not(:disabled), .actions a.primary:hover {
 .account-name { font-size: 0.875rem; font-weight: 600; }
 .account-summary { color: var(--muted); font-size: 0.8125rem; }
 .account-summary:empty { display: none; }
+.account-bonus { overflow-wrap: anywhere; }
 .account-button svg { width: 0.875rem; color: var(--muted); }
 
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }

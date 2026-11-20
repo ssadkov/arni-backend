@@ -74,6 +74,7 @@ export class UsageParser {
 	private readonly decoder = new TextDecoder();
 	private pending = '';
 	usage: ReportedUsage | null = null;
+	generationId: string | undefined;
 	done = false;
 
 	push(chunk: Uint8Array, final = false): void {
@@ -86,6 +87,7 @@ export class UsageParser {
 			if (dataText === '[DONE]') { this.done = true; break; }
 			try {
 				const data = JSON.parse(dataText);
+				this.generationId ??= openRouterGenerationId(data?.id);
 				const usage = withHost(validUsage(data.usage), data.provider);
 				if (usage) { this.usage = usage; }
 			} catch { /* Non-JSON events. */ }
@@ -93,4 +95,8 @@ export class UsageParser {
 		// Refuse unbounded/malformed events instead of accumulating an entire response.
 		if (this.pending.length > 1_000_000) { throw new Error('SSE event too large'); }
 	}
+}
+
+export function openRouterGenerationId(value: unknown) {
+	return typeof value === 'string' && /^gen-[a-zA-Z0-9_-]{1,190}$/.test(value) ? value : undefined;
 }

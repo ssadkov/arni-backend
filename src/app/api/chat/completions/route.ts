@@ -12,6 +12,7 @@ import {
 import { completeWithBedrock } from '@/lib/llm/bedrock';
 import { modelIdForUser } from '@/lib/llm/bedrockAccess';
 import { completeWithOpenRouter } from '@/lib/llm/openrouter';
+import { lookupOpenRouterGeneration } from '@/lib/llm/openRouterGeneration';
 import { completeWithGemini, geminiPickerAllowed, parseGeminiPickerId } from '@/lib/llm/gemini';
 import { isTrialPick, PAID_DEEPSEEK_MODEL, paidDeepSeekKey, TRIAL_MODEL, TRIAL_PICKER_ID, trialAllowed, trialDailyLimitMicros, trialDayStart, trialProvider } from '@/lib/llm/trialModel';
 import { resolveLlmProvider } from '@/lib/llm/provider';
@@ -22,7 +23,7 @@ import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
 import { applyMarkup, markupPercentFor } from '@/lib/billingMarkup';
 import { CONTEXT_ERROR_MESSAGE, isContextError } from '@/lib/llm/contextError';
 import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
-import { validUsage, withHost, type ReportedUsage } from '@/lib/budgetPolicy';
+import { openRouterGenerationId, validUsage, withHost, type ReportedUsage } from '@/lib/budgetPolicy';
 import { usageStream } from '@/lib/usageStream';
 import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
 import { usageCostMicros } from '@/lib/budgetPolicy';
@@ -233,16 +234,16 @@ export async function POST(req: NextRequest) {
       const reservation = await reserveBudget(user.id, model, provider, applyMarkup(price.reservedMicros, markupPercent), price.input, price.output,
         { requestId, requestedModel, chatId, client, markupPercent, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined });
       budgetReservationId = reservation.id;
-      // budgetPrice set a ceiling at the catalog price; DeepSeek keeps the test's routing (Wafer first) and reports its cost.
-      if (paidDeepSeek) { body.provider = trialProvider(); body.usage = { include: true }; }
+      if (paidDeepSeek) { body.usage = { include: true }; }
     }
     const catalogPrice = provider === 'bedrock' && forcedBedrockModel
       ? await prisma.bedrockModel.findUnique({ where: { id: forcedBedrockModel } }) : null;
+    const deepSeekKey = paidDeepSeek ? paidDeepSeekKey() : undefined;
     upstreamDispatched = true;
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel, catalogPrice)
       : geminiPick ? await pickedGemini(body, geminiPick)
-      : await completeWithOpenRouter(await freeRequestBody(body), trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : paidDeepSeek ? paidDeepSeekKey() : undefined);
+      : await completeWithOpenRouter(await freeRequestBody(body), trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : deepSeekKey);
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.
@@ -316,8 +317,17 @@ export async function POST(req: NextRequest) {
     // Шаг уже зарезервирован: ответ OpenRouter принят, даже если поток оборвётся.
     reservedUserId = null;
 
-    const recordUsage = async (usage: ReportedUsage | null) => {
+    let lookupAfterResponse: (() => Promise<void>) | undefined;
+    const recordUsage = async (usage: ReportedUsage | null, generationId?: string) => {
       if (budgetReservationId) {
+        if (deepSeekKey && generationId && usage?.cost === undefined) {
+          const reservationId = budgetReservationId;
+          lookupAfterResponse = async () => {
+            const reported = await lookupOpenRouterGeneration(generationId, deepSeekKey);
+            await settleBudget(reservationId, reported ?? usage, false, servedModel, reported !== null);
+          };
+          return;
+        }
         await settleBudget(budgetReservationId, usage, false, servedModel);
         return;
       }
@@ -349,7 +359,10 @@ export async function POST(req: NextRequest) {
     if (body.stream) {
       if (!response.body) { await recordUsage(null); throw new Error('Empty upstream stream'); }
       const monitored = usageStream(response.body, recordUsage);
-      after(() => monitored.completed);
+      after(async () => {
+        await monitored.completed;
+        await lookupAfterResponse?.();
+      });
       return new NextResponse(monitored.stream, {
         headers: {
           'Content-Type': 'text/event-stream',
@@ -363,7 +376,8 @@ export async function POST(req: NextRequest) {
 
     // 6. Обработка обычного (не потокового) запроса
     const json = await response.json();
-    await recordUsage(withHost(validUsage(json.usage), json.provider));
+    await recordUsage(withHost(validUsage(json.usage), json.provider), openRouterGenerationId(json.id));
+    if (lookupAfterResponse) { after(lookupAfterResponse); }
 
     return NextResponse.json(json, {
       headers: { ...servedHeaders, ...(freeSteps ? freeStepHeaders(freeSteps) : {}) },
