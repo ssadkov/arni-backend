@@ -2,8 +2,8 @@ export type BillingPayload = {
   rates: { RUB: number | null };
   checkoutReady: boolean;
   budget: { balanceMicros: number; enabled: boolean; expired: boolean; validUntil: string; limitsEnabled: boolean } | null;
-  entries: Array<{ id: string; kind: string; amountMicros: number; rubKopecks: number | null; note: string; createdAt: string }>;
-  usage: Array<{ id: string; model: string; createdAt: string; costMicros: number | null; providerCostMicros: number | null; promptTokens: number; completionTokens: number }>;
+  entries: Array<{ id: string; kind: string; amountMicros: number; rubKopecks: number | null; note: string; createdAt: string; bonus?: boolean }>;
+  usage: Array<{ id: string; model: string; createdAt: string; costMicros: number | null; providerCostMicros: number | null; promptTokens: number; completionTokens: number; walletMicros?: number }>;
   tariffs: Array<{
     id: string; name: string; provider: string;
     input: string | null; output: string | null;
@@ -99,9 +99,9 @@ export function renderBilling(payload: BillingPayload, section: BillingSection) 
       ? '<p>Сумму вы вводите на странице оплаты. После оплаты остаток обновится по уведомлению.</p><button id="start-checkout" class="primary" type="button">Перейти к оплате</button>'
       : '<p>Оплата ещё не настроена.</p>';
   } else if (section === 'payments') {
-    body += payload.entries.length === 0 ? '<p class="muted">Пополнений пока нет.</p>' : `<ul class="billing-list">${payload.entries.map(entry => `<li><span>${KIND[entry.kind] || entry.kind}</span><strong>${entry.rubKopecks != null ? `${(entry.rubKopecks / 100).toLocaleString('ru-RU')} ₽` : rub(entry.amountMicros, rate)}</strong><small>${escapeHtml(when(entry.createdAt))}</small></li>`).join('')}</ul>`;
+    body += payload.entries.length === 0 ? '<p class="muted">Пополнений пока нет.</p>' : `<ul class="billing-list">${payload.entries.map(entry => `<li><span>${entry.bonus ? 'Бонус DeepSeek' : KIND[entry.kind] || entry.kind}</span><strong>${entry.rubKopecks != null ? `${(entry.rubKopecks / 100).toLocaleString('ru-RU')} ₽` : rub(entry.amountMicros, rate)}</strong><small>${escapeHtml(when(entry.createdAt))}</small></li>`).join('')}</ul>`;
   } else if (section === 'expenses') {
-    body += payload.usage.length === 0 ? '<p class="muted">Расходов пока нет.</p>' : `<ul class="billing-list">${payload.usage.map(row => `<li><span>${escapeHtml(row.model)}</span><strong>${row.costMicros == null ? '—' : rub(row.costMicros, rate)}</strong><small>${row.providerCostMicros == null ? '' : `себестоимость ${rub(row.providerCostMicros, rate)} · `}${escapeHtml(when(row.createdAt))}</small></li>`).join('')}</ul>`;
+    body += payload.usage.length === 0 ? '<p class="muted">Расходов пока нет.</p>' : `<ul class="billing-list">${payload.usage.map(row => `<li><span>${escapeHtml(row.model)}</span><strong>${row.costMicros == null ? '—' : rub(row.costMicros, rate)}</strong><small>${row.walletMicros ? `из бонуса ${rub(row.walletMicros, rate)} · ` : ''}${row.providerCostMicros == null ? '' : `себестоимость ${rub(row.providerCostMicros, rate)} · `}${escapeHtml(when(row.createdAt))}</small></li>`).join('')}</ul>`;
   } else {
     body += tariffTable(payload.tariffs);
   }

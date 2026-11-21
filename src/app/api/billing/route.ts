@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import prisma from '@/lib/prisma';
 import { BudgetError, budgetSnapshot } from '@/lib/budget';
+import { DEEPSEEK_BONUS_LEDGER, readDeepSeekBonus } from '@/lib/deepSeekBonus';
 import { billingRates, formatBillingRub } from '@/lib/billingCurrency';
 import { checkoutConfigured } from '@/lib/billingPayment';
 import { applyMarkup, markedPerMillion, markupTable, percentFromTable } from '@/lib/billingMarkup';
@@ -44,20 +45,21 @@ export function OPTIONS(req: NextRequest) {
 export async function GET(req: NextRequest) {
 	try {
 		const { user } = await webUser(req);
-		const [budget, rates, markups, entries, usage, models] = await Promise.all([
+		const [budget, rates, markups, entries, usage, models, wallet] = await Promise.all([
 			prisma.accountBudget.findUnique({ where: { userId: user.id } }),
 			billingRates(),
 			markupTable(),
 			prisma.budgetEntry.findMany({
 				where: { userId: user.id, kind: { in: ['grant', 'payment', 'payment_refund'] } },
 				orderBy: { createdAt: 'desc' }, take: 30,
-				select: { id: true, kind: true, amountMicros: true, rubKopecks: true, note: true, createdAt: true },
+				select: { id: true, key: true, kind: true, amountMicros: true, rubKopecks: true, note: true, createdAt: true },
 			}),
 			prisma.usageLog.findMany({
 				where: { userId: user.id }, orderBy: { createdAt: 'desc' }, take: 30,
-				select: { id: true, model: true, createdAt: true, costMicros: true, providerCostMicros: true, promptTokens: true, completionTokens: true },
+				select: { id: true, model: true, createdAt: true, costMicros: true, providerCostMicros: true, walletMicros: true, promptTokens: true, completionTokens: true },
 			}),
 			modelsAllowedForUser(user.id),
+			readDeepSeekBonus(user.id),
 		]);
 		const tokenPrice = (perMillion: number, percent: number) => {
 			const amount = Math.round(markedPerMillion(perMillion, percent) * 1_000_000);
@@ -82,8 +84,9 @@ export async function GET(req: NextRequest) {
 		];
 		return webJson(req, {
 			rates, checkoutReady: checkoutConfigured(),
-			budget: budget ? { ...budgetSnapshot(budget), limitsEnabled: budget.limitsEnabled } : null,
-			entries, usage, tariffs,
+			budget: budget ? budgetSnapshot(budget, new Date(), wallet) : null,
+			entries: entries.map(({ key, ...entry }) => ({ ...entry, bonus: key.startsWith(`${DEEPSEEK_BONUS_LEDGER}:`) })),
+			usage, tariffs,
 		});
 	} catch (error) {
 		const known = error instanceof BudgetError;

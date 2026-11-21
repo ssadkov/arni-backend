@@ -40,6 +40,12 @@ const { GET: getUsage } = require('../src/app/api/account/usage/route.ts');
 const { encryptJWT } = require('../src/lib/jwt.ts');
 const { randomUUID } = require('node:crypto');
 const { billingRates } = require('../src/lib/billingCurrency.ts');
+const { mock } = require('node:test');
+const { PAID_DEEPSEEK_MODEL, TRIAL_PICKER_ID } = require('../src/lib/llm/trialModel.ts');
+const { DEEPSEEK_BONUS_KIND: BONUS_KIND, deepSeekBonusReport } = require('../src/lib/deepSeekBonus.ts');
+const { POST: grantBonus } = require('../src/app/api/admin/deepseek-bonus/grant/route.ts');
+const { GET: getAccount } = require('../src/app/api/account/route.ts');
+const { GET: getModels } = require('../src/app/api/models/route.ts');
 
 let passed = 0;
 async function check(name, run) { await run(); passed++; console.log(`PASS ${name}`); }
@@ -53,6 +59,8 @@ function grantRequest(userId, payload, authenticated = true) {
 async function main() {
 	// Prisma loads the developer's .env, which holds a real Gemini key; tests must never reach Google.
 	delete process.env.GEMINI_API_KEY;
+	delete process.env.DEEPSEEK_BONUS_ENABLED;
+	await prisma.billingMarkup.upsert({ where: { id: 'global' }, create: { id: 'global', percent: 0 }, update: { percent: 0 } });
 	await check('additive migration preserves existing token balance', async () => {
 		const fixture = await prisma.user.findUnique({ where: { id: 'migration-fixture' }, include: { budget: true } });
 		assert.deepEqual({ tokens: fixture?.tokenBalance, budget: fixture?.budget }, { tokens: 12345, budget: null });
@@ -405,6 +413,257 @@ async function main() {
 		const log = await prisma.usageLog.findFirstOrThrow({ where: { userId: marked.id, model: 'marked' } });
 		assert.equal(log.providerCostMicros, 10_000);
 		assert.equal(log.costMicros, 20_000);
+	});
+	await check('bonus grants are idempotent and only active paid users qualify for the batch', async () => {
+		const now = Date.now();
+		process.env.DEEPSEEK_BONUS_ENABLED = 'true';
+		process.env.DEEPSEEK_BONUS_EXPIRES_AT = new Date(now + 86400_000).toISOString();
+		const make = (name, budget, isBanned = false) => prisma.user.create({ data: {
+			email: `bonus-${name}@billing-test.invalid`, isBanned,
+			...(budget ? { budget: { create: { balanceMicros: 20_000_000, validUntil: new Date(now + 86_400_000), ...budget } } } : {}),
+		} });
+		const [active, paused, expired, banned, free] = await Promise.all([
+			make('active', {}), make('paused', { enabled: false }), make('expired', { validUntil: new Date(now - 1000) }),
+			make('banned', {}, true), make('free', null),
+		]);
+		const adminAuth = `Basic ${Buffer.from('billing-test:local-test-only').toString('base64')}`;
+		const request = (dryRun, authorization = adminAuth) => grantBonus(new NextRequest('http://localhost/api/admin/deepseek-bonus/grant', {
+			method: 'POST', headers: { Authorization: authorization, 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }),
+		}));
+		assert.equal((await request(true, 'Invalid')).status, 401);
+		const preview = await (await request(true)).json();
+		assert.ok(preview.userIds.includes(active.id));
+		for (const account of [paused, expired, banned, free]) { assert.ok(!preview.userIds.includes(account.id)); }
+		assert.equal(await prisma.budgetWallet.count(), 0);
+		assert.equal((await (await request(false)).json()).created, preview.count);
+		const replay = await (await request(false)).json();
+		assert.deepEqual(replay, { created: 0, skipped: preview.count, unavailable: 0, failed: 0 });
+		assert.equal((await (await request(true)).json()).count, 0);
+		assert.equal(await prisma.budgetEntry.count({ where: { userId: active.id, key: `wallet:${BONUS_KIND}:${active.id}` } }), 1);
+		const bonusRequest = (route) => encryptJWT({ userId: active.id }).then(token => route(
+			new NextRequest('http://localhost/api/test', { headers: { Authorization: `Bearer ${token}` } }),
+		));
+		const account = (await (await bonusRequest(getAccount)).json()).user;
+		assert.equal(account.budget.bonus.balanceMicros, 15_000_000);
+		assert.equal(account.budget.bonus.weekly.limitMicros, 10_000_000);
+		const catalog = (await (await bonusRequest(getModels)).json()).data;
+		const deepseek = catalog.find(row => row.id === PAID_DEEPSEEK_MODEL);
+		assert.equal(deepseek.arni_bonus.balanceMicros, 15_000_000);
+		assert.match(deepseek.name, /бонус \$15\.00/);
+		delete process.env.DEEPSEEK_BONUS_ENABLED;
+		assert.equal((await (await bonusRequest(getAccount)).json()).user.budget.bonus, null);
+	});
+
+	await check('positive manual and ruble top-ups each grant the promo once', async () => {
+		process.env.DEEPSEEK_BONUS_ENABLED = 'true';
+		const user = await prisma.user.create({ data: { email: 'bonus-manual@billing-test.invalid' } });
+		assert.equal((await grantRequest(user.id, { ...defaults, grantUsd: 0, key: randomUUID() })).status, 200);
+		const count = (id) => prisma.budgetWallet.count({ where: { userId: id, kind: BONUS_KIND } });
+		assert.equal(await count(user.id), 0);
+		for (const key of [randomUUID(), randomUUID()]) {
+			assert.equal((await grantRequest(user.id, { ...defaults, grantUsd: 1, key })).status, 200);
+		}
+		assert.equal(await count(user.id), 1);
+		const payer = await prisma.user.create({ data: { email: 'bonus-payment@billing-test.invalid' } });
+		const { handlePaymentNotice } = require('../src/lib/billingPayment.ts');
+		const notice = { idAccount: `bonus-acct-${payer.id}`, idLogicliftUser: payer.id, idRate: '9001', accountStatus: '5', accountSum: '100.00', currency: 'RUB' };
+		await handlePaymentNotice(notice, 100);
+		await handlePaymentNotice(notice, 100);
+		assert.equal(await count(payer.id), 1);
+		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId: payer.id } })).balanceMicros, 1_000_000);
+	});
+
+	await check('bonus splits only DeepSeek charges and protects the main balance, including after disabling', async () => {
+		const { id } = await prisma.user.findUniqueOrThrow({ where: { email: 'bonus-active@billing-test.invalid' } });
+		const where = { userId_kind: { userId: id, kind: BONUS_KIND } };
+		const wallet = () => prisma.budgetWallet.findUniqueOrThrow({ where });
+		const budget = () => prisma.accountBudget.findUniqueOrThrow({ where: { userId: id } });
+		const reserve = (amount, requestId) => reserveBudget(id, PAID_DEEPSEEK_MODEL, 'openrouter', amount, 0.1, 0.6, { markupPercent: 5, requestId });
+		const usage = (cost) => ({ prompt_tokens: 10, completion_tokens: 2, cost });
+		const other = await reserveBudget(id, 'claude', 'bedrock', 100_000, 3, 15);
+		assert.equal(other.walletMicros, 0);
+		await settleBudget(other.id, null, true);
+		const splitRequest = randomUUID();
+		const split = await reserve(6_000_000, splitRequest);
+		assert.equal(split.walletMicros, 5_000_000);
+		assert.equal((await budget()).fiveHourUsedMicros, 1_000_000);
+		assert.equal((await budget()).fiveHourRequests, 1);
+		assert.equal(await prisma.budgetEntry.count({ where: { key: { startsWith: `reserve:${split.id}` } } }), 2);
+		await settleBudget(split.id, usage(4));
+		assert.equal((await wallet()).balanceMicros, 10_800_000);
+		assert.equal((await budget()).balanceMicros, 20_000_000);
+		assert.deepEqual(await prisma.usageLog.findUniqueOrThrow({ where: { requestId: splitRequest },
+			select: { walletMicros: true, costMicros: true, providerCostMicros: true } }),
+			{ walletMicros: 4_200_000, costMicros: 4_200_000, providerCostMicros: 4_000_000 });
+		assert.equal((await deepSeekBonusReport()).spentMicros, 4_200_000);
+		await prisma.accountBudget.update({ where: { userId: id }, data: { validUntil: new Date(Date.now() - 1000) } });
+		await assert.rejects(reserve(1_000_000), error => error.code === 'access_expired');
+		const only = await reserve(600_000);
+		delete process.env.DEEPSEEK_BONUS_ENABLED;
+		await settleBudget(only.id, usage(1));
+		assert.equal((await budget()).balanceMicros, 20_000_000);
+		assert.equal((await wallet()).balanceMicros, 10_200_000);
+		assert.equal((await prisma.budgetReservation.findUniqueOrThrow({ where: { id: only.id } })).costMicros, 600_000);
+		await assert.rejects(reserve(100_000), error => error.code === 'access_expired');
+		process.env.DEEPSEEK_BONUS_ENABLED = 'true';
+		const disputed = await reserve(100_000);
+		await prisma.budgetWallet.update({ where, data: { expiresAt: new Date(Date.now() - 1000) } });
+		await settleBudget(disputed.id, null, true);
+		assert.equal((await wallet()).balanceMicros, 10_100_000);
+		assert.equal((await budget()).balanceMicros, 20_000_000);
+		delete process.env.DEEPSEEK_BONUS_ENABLED;
+	});
+
+	await check('late wallet refunds respect window boundaries and concurrent reserves respect limits', async () => {
+		const { id } = await prisma.user.findUniqueOrThrow({ where: { email: 'bonus-manual@billing-test.invalid' } });
+		const where = { userId_kind: { userId: id, kind: BONUS_KIND } };
+		const wallet = () => prisma.budgetWallet.findUniqueOrThrow({ where });
+		const reserve = amount => reserveBudget(id, PAID_DEEPSEEK_MODEL, 'openrouter', amount, 0.1, 0.6);
+		const now = Date.now();
+		process.env.DEEPSEEK_BONUS_ENABLED = 'true';
+		mock.timers.enable({ apis: ['Date'], now });
+		try {
+			await prisma.budgetWallet.update({ where, data: { fiveHourStartedAt: new Date(now - FIVE_HOURS_MS + 1000) } });
+			const old = await reserve(500_000);
+			mock.timers.setTime(now + 2000);
+			const current = await reserve(700_000);
+			delete process.env.DEEPSEEK_BONUS_ENABLED;
+			await settleBudget(old.id, null, true);
+			assert.equal((await wallet()).fiveHourUsedMicros, 700_000);
+			assert.equal((await wallet()).weeklyUsedMicros, 700_000);
+			assert.equal((await wallet()).balanceMicros, 14_300_000);
+			await settleBudget(current.id, null, true);
+			assert.equal((await wallet()).balanceMicros, 15_000_000);
+			process.env.DEEPSEEK_BONUS_ENABLED = 'true';
+			const results = await Promise.allSettled([reserve(4_500_000), reserve(4_500_000)]);
+			const accepted = results.filter(result => result.status === 'fulfilled');
+			assert.equal(accepted.length, 1);
+			assert.equal((await wallet()).fiveHourUsedMicros, 4_500_000);
+			assert.equal((await wallet()).balanceMicros, 10_500_000);
+			await prisma.accountBudget.update({ where: { userId: id }, data: { fiveHourRequestLimit: 1 } });
+			await assert.rejects(reserve(100_000), error => error.code === 'five_hour_limit');
+			await settleBudget(accepted[0].value.id, null, true);
+		} finally {
+			mock.timers.reset();
+			delete process.env.DEEPSEEK_BONUS_ENABLED;
+		}
+	});
+
+	await check('DeepSeek records interruption diagnostics and settles paid and trial streams with the correct key', async () => {
+		const { id } = await prisma.user.findUniqueOrThrow({ where: { email: 'bonus-payment@billing-test.invalid' } });
+		const trialUser = await prisma.user.create({ data: { email: 'trial-stream@billing-test.invalid' } });
+		process.env.OPENROUTER_PAID_API_KEY = 'mock-paid-key';
+		process.env.OPENROUTER_TRIAL_API_KEY = 'mock-trial-key';
+		process.env.DEEPSEEK_TRIAL_EMAILS = trialUser.email;
+		await prisma.billingMarkup.update({ where: { id: 'global' }, data: { percent: 5 } });
+		const originalLoad = Module._load;
+		const originalFetch = global.fetch;
+		const originalError = console.error;
+		const originalWarn = console.warn;
+		const tasks = [];
+		const errors = [];
+		const warnings = [];
+		const lookups = [];
+		let mode = 'paid';
+		const file = require.resolve('../src/app/api/chat/completions/route.ts');
+		delete require.cache[file];
+		Module._load = function (name, parent, ...rest) {
+			if (name === 'next/server') { return { ...originalLoad.call(this, name, parent, ...rest), after: task => tasks.push(task) }; }
+			if (name === '@/lib/llm/openrouter') {
+				return { completeWithOpenRouter: async (body, key) => {
+					assert.equal(key, mode === 'trial' ? 'mock-trial-key' : 'mock-paid-key');
+					if (mode !== 'trial') { assert.deepEqual(body.provider.max_price, { prompt: 0.1, completion: 0.6, request: 0 }); }
+					const upstream = {
+						id: mode === 'missing-id' ? undefined : `gen-${mode}`,
+						provider: 'stream-host',
+						choices: mode === 'normal' ? [{ finish_reason: 'length' }] : mode === 'paid' ? [{ finish_reason: 'error' }] : [],
+						error: mode === 'paid' ? { code: 502, message: 'provider disconnected' } : undefined,
+						usage: mode === 'normal' ? { prompt_tokens: 100, completion_tokens: 6, cost: 0.002 } : undefined,
+					};
+					let sent = false;
+					return new Response(new ReadableStream({
+						pull(controller) {
+							if (sent) {
+								if (mode === 'paid') { controller.error(new Error('interrupted')); }
+								else { controller.close(); }
+								return;
+							}
+							sent = true;
+							controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(upstream)}\n\n${mode === 'normal' ? 'data: [DONE]\n\n' : ''}`));
+						},
+					}));
+				} };
+			}
+			return originalLoad.call(this, name, parent, ...rest);
+		};
+		let chat;
+		try { chat = require(file).POST; } finally { Module._load = originalLoad; }
+		global.fetch = async (url, init) => {
+			const target = new URL(String(url));
+			if (target.origin !== 'https://openrouter.ai' || target.pathname !== '/api/v1/generation') { return originalFetch(url, init); }
+			const generation = target.searchParams.get('id');
+			lookups.push([generation, init.headers.Authorization]);
+			if (generation === 'gen-lookup-failed') { return new Response(null, { status: 401 }); }
+			return Response.json({ data: { total_cost: 0.002, native_tokens_prompt: 100, native_tokens_completion: 6, native_tokens_cached: 50, provider_name: 'mock' } });
+		};
+		console.error = (message, ...rest) => message === 'OpenRouter stream interrupted' ? errors.push(JSON.parse(rest[0])) : originalError(message, ...rest);
+		console.warn = (message, ...rest) => message === 'OpenRouter output limit reached' ? warnings.push(JSON.parse(rest[0])) : originalWarn(message, ...rest);
+		const send = async (name, userId = id, model = PAID_DEEPSEEK_MODEL) => {
+			mode = name;
+			const token = await encryptJWT({ userId });
+			const response = await chat(new NextRequest('http://localhost/api/chat/completions', {
+				method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Arni-Chat-Id': name },
+				body: JSON.stringify({ model, messages: [{ role: 'user', content: 'do-not-log-this-message' }], stream: true }),
+			}));
+			assert.equal(response.status, 200);
+			if (name === 'paid') { await assert.rejects(response.text()); }
+			else { await response.text(); }
+		};
+		const flush = () => Promise.all(tasks.splice(0).map(task => task()));
+		const usageRow = (chatId, userId = id) => prisma.usageLog.findFirstOrThrow({ where: { userId, chatId } });
+		try {
+			await send('paid');
+			assert.equal(lookups.length, 0);
+			assert.equal((await prisma.budgetReservation.findFirstOrThrow({ where: { userId: id } })).status, 'pending');
+			await flush();
+			const log = await usageRow('paid');
+			assert.deepEqual([log.costMicros, log.providerCostMicros, log.accounting, log.costBasis, log.cacheReadTokens, log.walletMicros],
+				[2100, 2000, 'reported', 'provider_lookup', 50, 0]);
+			assert.deepEqual([log.generationId, log.region, log.finishReason, log.streamError],
+				['gen-paid', 'mock', 'error', '502: provider disconnected']);
+			assert.deepEqual(errors[0], { requestId: log.requestId, model: PAID_DEEPSEEK_MODEL, host: 'stream-host',
+				generationId: 'gen-paid', finishReason: 'error', streamError: '502: provider disconnected' });
+			for (const fallback of ['missing-id', 'lookup-failed']) {
+				await send(fallback);
+				await flush();
+				const estimate = await usageRow(fallback);
+				const reservation = await prisma.budgetReservation.findUniqueOrThrow({ where: { requestId: estimate.requestId } });
+				assert.deepEqual([estimate.accounting, estimate.costBasis, estimate.costMicros, estimate.streamError, estimate.region],
+					['estimated', 'reservation', reservation.reservedMicros, 'missing_done', 'stream-host']);
+			}
+			await send('normal');
+			await flush();
+			const normal = await usageRow('normal');
+			assert.deepEqual([normal.costMicros, normal.costBasis, normal.finishReason, normal.streamError], [2100, 'provider', 'length', null]);
+			assert.equal(warnings.length, 1);
+			assert.equal(warnings[0].requestId, normal.requestId);
+			await send('trial', trialUser.id, TRIAL_PICKER_ID);
+			await flush();
+			const trial = await usageRow('trial', trialUser.id);
+			assert.deepEqual([trial.costMicros, trial.accounting, trial.costBasis, trial.region, trial.streamError],
+				[2000, 'reported', 'provider_lookup', 'mock', 'missing_done']);
+			assert.equal(await prisma.budgetReservation.count({ where: { userId: trialUser.id } }), 0);
+			assert.deepEqual(lookups, [['gen-paid', 'Bearer mock-paid-key'], ['gen-lookup-failed', 'Bearer mock-paid-key'], ['gen-trial', 'Bearer mock-trial-key']]);
+			assert.equal(errors.length, 4);
+			assert.doesNotMatch(JSON.stringify(errors), /do-not-log-this-message/);
+		} finally {
+			global.fetch = originalFetch;
+			console.error = originalError;
+			console.warn = originalWarn;
+			delete process.env.OPENROUTER_PAID_API_KEY;
+			delete process.env.OPENROUTER_TRIAL_API_KEY;
+			delete process.env.DEEPSEEK_TRIAL_EMAILS;
+		}
 	});
 	console.log(`${passed} billing checks passed on disposable PostgreSQL.`);
 }

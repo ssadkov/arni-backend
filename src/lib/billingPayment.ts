@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
+import { deepSeekBonusEnabled, grantDeepSeekBonus } from './deepSeekBonus';
 import { billingRates } from '@/lib/billingCurrency';
 
 /** Paid balance does not expire. Admin grants still use their own term until the first payment. */
@@ -122,7 +123,7 @@ export async function handlePaymentNotice(input: PaymentNoticeInput, rubPerUsd?:
 	if (!user) { throw new PaymentNoticeError(404, 'USER_NOT_FOUND', `Пользователь ${userId} не найден`); }
 
 	return prisma.$transaction(async tx => {
-		await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`;
+		await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR NO KEY UPDATE`;
 		const existing = await tx.paymentNotice.findUnique({ where: { idAccount } });
 		const data = {
 			userId, accountNumber: optionalText(input.accountNumber), idRate: input.idRate.trim(), accountStatus, status,
@@ -172,6 +173,10 @@ async function credit(tx: Prisma.TransactionClient, userId: string, idAccount: s
 		userId, key: `payment:${idAccount}`, kind: 'payment', amountMicros: micros, rubKopecks, rubPerUsd: rate, externalId: idAccount,
 		note: `Оплата ${(rubKopecks / 100).toFixed(2)} RUB · счёт ${idAccount}`,
 	} });
+	if (deepSeekBonusEnabled()) {
+		const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { isBanned: true } });
+		if (!user.isBanned) { await grantDeepSeekBonus(tx, userId); }
+	}
 }
 
 async function refund(tx: Prisma.TransactionClient, userId: string, idAccount: string, micros: number) {

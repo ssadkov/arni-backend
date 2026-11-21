@@ -41,7 +41,8 @@ export type ReportedUsage = { prompt_tokens: number; completion_tokens: number; 
 
 /** Attaches OpenRouter's serving host to the usage it was reported with. */
 export function withHost(usage: ReportedUsage | null, provider: unknown): ReportedUsage | null {
-	return usage && typeof provider === 'string' && provider.trim() ? { ...usage, host: provider.trim().slice(0, 60) } : usage;
+	const host = metadataText(provider, 60);
+	return usage && host ? { ...usage, host } : usage;
 }
 
 /** Prompt tokens include all three input buckets; cached tokens must not be billed twice. */
@@ -69,12 +70,53 @@ export function validUsage(value: unknown): ReportedUsage | null {
 		...(details ? { prompt_tokens_details: { cached_tokens: Number(read), cache_creation_input_tokens: Number(write) } } : {}) };
 }
 
+export type OpenRouterResponseMetadata = {
+	generationId?: string;
+	host?: string;
+	finishReason?: string;
+	streamError?: string;
+};
+
+export type StreamMetadata = OpenRouterResponseMetadata & { completed: boolean };
+
+function metadataText(value: unknown, limit: number) {
+	if (typeof value !== 'string') { return undefined; }
+	return value.replaceAll('\0', '').trim().split(/\s+/).join(' ').slice(0, limit) || undefined;
+}
+
+function fields(value: unknown): Record<string, unknown> {
+	return value && typeof value === 'object' ? value as Record<string, unknown> : {};
+}
+
+export function openRouterResponseMetadata(payload: unknown): OpenRouterResponseMetadata {
+	const data = fields(payload);
+	const choice = fields(Array.isArray(data.choices) ? data.choices[0] : undefined);
+	const finishReason = metadataText(choice.finish_reason, 60);
+	const upstreamError = data.error ?? choice.error;
+	const error = fields(upstreamError);
+	const code = metadataText(typeof error.code === 'number' ? String(error.code) : error.code, 60);
+	const message = metadataText(error.message, 300);
+	const streamError = upstreamError != null
+		? ([code, message].filter(Boolean).join(': ').slice(0, 300) || 'upstream_error')
+		: finishReason === 'error' ? 'finish_reason_error' : undefined;
+	return { generationId: openRouterGenerationId(data.id), host: metadataText(data.provider, 60), finishReason, streamError };
+}
+
 /** Incremental UTF-8/SSE parser: network chunks need not end on event boundaries. */
 export class UsageParser {
 	private readonly decoder = new TextDecoder();
 	private pending = '';
+	private seen: OpenRouterResponseMetadata = {};
 	usage: ReportedUsage | null = null;
 	done = false;
+
+	streamMetadata(transportFailed = false): StreamMetadata {
+		return {
+			...this.seen,
+			completed: this.done,
+			streamError: this.seen.streamError ?? (transportFailed ? 'transport_error' : this.done ? undefined : 'missing_done'),
+		};
+	}
 
 	push(chunk: Uint8Array, final = false): void {
 		this.pending += this.decoder.decode(chunk, { stream: !final });
@@ -85,12 +127,22 @@ export class UsageParser {
 			const dataText = line.slice(5).trim();
 			if (dataText === '[DONE]') { this.done = true; break; }
 			try {
-				const data = JSON.parse(dataText);
-				const usage = withHost(validUsage(data.usage), data.provider);
+				const data = fields(JSON.parse(dataText));
+				const metadata = openRouterResponseMetadata(data);
+				this.seen.generationId ??= metadata.generationId;
+				this.seen.host = metadata.host ?? this.seen.host;
+				this.seen.finishReason = metadata.finishReason ?? this.seen.finishReason;
+				this.seen.streamError = metadata.streamError === 'finish_reason_error'
+					? this.seen.streamError ?? metadata.streamError : metadata.streamError ?? this.seen.streamError;
+				const usage = withHost(validUsage(data.usage), this.seen.host);
 				if (usage) { this.usage = usage; }
 			} catch { /* Non-JSON events. */ }
 		}
 		// Refuse unbounded/malformed events instead of accumulating an entire response.
 		if (this.pending.length > 1_000_000) { throw new Error('SSE event too large'); }
 	}
+}
+
+export function openRouterGenerationId(value: unknown) {
+	return typeof value === 'string' && /^gen-[a-zA-Z0-9_-]{1,190}$/.test(value) ? value : undefined;
 }

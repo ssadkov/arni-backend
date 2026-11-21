@@ -93,11 +93,15 @@ model UsageLog {
   // web, arni, arni-code, or unknown. Empty on rows written before client accounting.
   client           String?
   costMicros       Int?
+  walletMicros     Int      @default(0)
   // What the provider charged, before markup. costMicros is the amount taken from the user.
   providerCostMicros Int?
   markupPercent    Int      @default(0)
   accounting       String? // reported, estimated, or legacy
-  costBasis        String? // provider, catalog, reservation; separate from legacy token-balance accounting
+  costBasis        String? // provider, provider_lookup, catalog, reservation
+  generationId     String?
+  finishReason     String?
+  streamError      String?
   requestId        String? @unique
   requestedModel   String?
   operation        String @default("chat")
@@ -140,6 +144,28 @@ model AccountBudget {
   user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   entries           BudgetEntry[]
   reservations      BudgetReservation[]
+  wallets           BudgetWallet[]
+}
+
+model BudgetWallet {
+  id                 String   @id @default(uuid())
+  userId             String
+  kind               String
+  models             String[]
+  grantedMicros      Int
+  balanceMicros      Int
+  expiresAt          DateTime
+  fiveHourLimitMicros Int
+  weeklyLimitMicros  Int
+  fiveHourStartedAt  DateTime?
+  weeklyStartedAt    DateTime?
+  fiveHourUsedMicros Int      @default(0)
+  weeklyUsedMicros   Int      @default(0)
+  createdAt          DateTime @default(now())
+  budget             AccountBudget @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  reservations       BudgetReservation[]
+
+  @@unique([userId, kind])
 }
 
 model BudgetEntry {
@@ -181,6 +207,11 @@ model BudgetReservation {
   completionTokens Int?
   fiveHourStartedAt DateTime
   weeklyStartedAt DateTime
+  walletId String?
+  walletMicros Int @default(0)
+  walletFiveHourStartedAt DateTime?
+  walletWeeklyStartedAt DateTime?
+  wallet BudgetWallet? @relation(fields: [walletId], references: [id], onDelete: NoAction)
   createdAt       DateTime @default(now())
   budget          AccountBudget @relation(fields: [userId], references: [userId], onDelete: Cascade)
   @@index([userId, status])

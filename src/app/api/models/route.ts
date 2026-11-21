@@ -10,6 +10,7 @@ import { billingRates } from '@/lib/billingCurrency';
 import { markedPerMillion, markupTable, percentFromTable } from '@/lib/billingMarkup';
 import { geminiPickerAllowed, geminiPickerCatalog } from '@/lib/llm/gemini';
 import { paidDeepSeekRow, TRIAL_MAX_OUTPUT_TOKENS, trialAllowed, trialCatalogRow } from '@/lib/llm/trialModel';
+import { readDeepSeekBonus } from '@/lib/deepSeekBonus';
 import { defaultFreeModelId, isRecommendedModel, pickBedrockModels, pickFreeModels } from '@/lib/modelPicker';
 
 function outputLimit(model: RouterModel): number {
@@ -27,6 +28,7 @@ export async function GET(req: NextRequest) {
 		let bedrock: Record<string, unknown>[] = [];
 		let gemini: Record<string, unknown>[] = [];
 		let trial = false;
+		let bonus: { balanceMicros: number; expiresAt: string } | null = null;
 		const auth = req.headers.get('authorization');
 		if (auth?.startsWith('Bearer ')) {
 			let userId: string;
@@ -41,6 +43,10 @@ export async function GET(req: NextRequest) {
 			trial = trialAllowed(user.email);
 			const markups = managed || trial ? await markupTable() : new Map<string, number>();
 			if (managed) {
+				const wallet = user.budget?.enabled ? await readDeepSeekBonus(userId) : null;
+				if (wallet && wallet.balanceMicros > 0 && new Date() < wallet.expiresAt) {
+					bonus = { balanceMicros: wallet.balanceMicros, expiresAt: wallet.expiresAt.toISOString() };
+				}
 				const allowed = await modelsAllowedForUser(userId);
 				const selected = await modelIdForUser(userId, user.bedrockModelId);
 				const priced = allowed.filter(model => model.inputPerMillion != null && model.outputPerMillion != null);
@@ -69,7 +75,7 @@ export async function GET(req: NextRequest) {
 			top_provider: { ...model.top_provider, max_completion_tokens: outputLimit(model) },
 			arni_traffic: lights.get(model.id), arni_recommended: isRecommendedModel(model.id),
 		}));
-		const trialRow = trial ? trialCatalogRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
+		const trialRow = trial && !bonus ? trialCatalogRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
 		// Paying accounts get DeepSeek from their budget, listed first among the paid models.
 		const paidBase = managed ? paidDeepSeekRow(router, TRIAL_MAX_OUTPUT_TOKENS) : null;
 		const paidPercent = paidBase ? percentFromTable(await markupTable(), { source: 'openrouter', model: String(paidBase.id) }) : 0;
@@ -78,7 +84,12 @@ export async function GET(req: NextRequest) {
 			return Number.isFinite(amount) ? String(markedPerMillion(amount * 1_000_000, paidPercent) / 1_000_000) : value;
 		};
 		const paidRow = paidBase?.pricing ? { ...paidBase, pricing: { ...paidBase.pricing, prompt: marked(paidBase.pricing.prompt), completion: marked(paidBase.pricing.completion) } } : paidBase;
-		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...(trialRow ? [trialRow] : []), ...(paidRow ? [paidRow] : []), ...bedrock, ...models, ...gemini] }, {
+		const bonusRow = paidRow && bonus ? {
+			...paidRow,
+			name: `${paidRow.name} · бонус $${(bonus.balanceMicros / 1_000_000).toFixed(2)} до ${new Date(bonus.expiresAt).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', timeZone: 'Asia/Almaty' })}`,
+			arni_bonus: bonus,
+		} : paidRow;
+		return NextResponse.json({ arni_managed: managed, billingRates: rates, data: [...(trialRow ? [trialRow] : []), ...(bonusRow ? [bonusRow] : []), ...bedrock, ...models, ...gemini] }, {
 			headers: { 'Cache-Control': auth ? 'private, no-store' : 'public, s-maxage=60, stale-while-revalidate=300', ...webCorsHeaders(req) },
 		});
 	} catch (error) {

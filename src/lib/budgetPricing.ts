@@ -5,7 +5,7 @@ import { screenshotCount, supportsScreenshots, conservativeInputTokenBound } fro
 import { FREE_MAX_OUTPUT_TOKENS, managedOutputLimit, modelCapabilities } from './llm/modelCapabilities';
 import { countBedrockInput } from './llm/bedrock';
 import { routerModel, routerCacheMode, type RouterModel } from './llm/openRouterCatalog';
-import { isDeepSeekPick, TRIAL_MAX_OUTPUT_TOKENS } from './llm/trialModel';
+import { isDeepSeekPick, PAID_DEEPSEEK_MODEL, TRIAL_MAX_OUTPUT_TOKENS, trialProvider } from './llm/trialModel';
 import { pruneScreenshots } from './llm/screenshotHistory';
 
 export type BudgetBody = {
@@ -73,7 +73,14 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 		output = Math.max(Number(price.completion), ...(price.overrides || []).map(tier => Number(tier.completion || price.completion))) * 1_000_000;
 		routerWriteRate = Math.max(Number(price.input_cache_write || 0), ...(price.overrides || []).map(tier => Number(tier.input_cache_write || 0))) * 1_000_000;
 		if (price.input_cache_read != null) { routerReadRate = Math.max(Number(price.input_cache_read), ...(price.overrides || []).map(tier => Number(tier.input_cache_read || price.input_cache_read))) * 1_000_000; }
-		body.provider = { max_price: { prompt: input, completion: output, request: 0 }, require_parameters: true };
+		if (model === PAID_DEEPSEEK_MODEL) {
+			const route = trialProvider();
+			input = route.max_price.prompt;
+			output = route.max_price.completion;
+			body.provider = { ...route, max_price: { ...route.max_price, request: 0 } };
+		} else {
+			body.provider = { max_price: { prompt: input, completion: output, request: 0 }, require_parameters: true };
+		}
 	}
 	if (![input, output].every(value => Number.isFinite(value) && value >= 0)) {
 		throw new BudgetError('pricing_unavailable', 'Некорректная цена API в каталоге.', 503);

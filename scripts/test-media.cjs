@@ -138,12 +138,14 @@ async function main() {
 		const publicList = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models'));
 		assert.ok((await publicList.json()).data.every(row => row.id.endsWith(':free')));
 	});
-	await check('remote, malformed, oversized, wrong-role screenshots rejected', async () => {
+	await check('invalid screenshots are rejected and long histories keep only recent screenshots', async () => {
 		for (const part of [{ type: 'image_url', image_url: { url: 'http://169.254.169.254/' } }, { type: 'image_url', image_url: { url: 'data:image/png;base64,YQ==' } }]) {
 			assert.throws(() => managedBody({ messages: [{ role: 'user', content: [part] }] }, true));
 		}
 		assert.throws(() => managedBody({ messages: [{ role: 'system', content: [imagePart] }] }, true));
-		assert.throws(() => managedBody({ messages: [{ role: 'user', content: Array(21).fill(imagePart) }] }, true));
+		const { KEPT_SCREENSHOTS } = require('../src/lib/llm/screenshotHistory.ts');
+		const history = managedBody({ messages: [{ role: 'user', content: Array(21).fill(imagePart) }] }, true);
+		assert.equal(history.messages[0].content.filter(part => part.type === 'image_url').length, KEPT_SCREENSHOTS);
 		assert.throws(() => managedBody({ messages: [{ role: 'user', content: [imagePart] }] }));
 		const large = Buffer.from(png, 'base64'); large.writeUInt32BE(9000, 16);
 		assert.throws(() => managedBody({ messages: [{ role: 'user', content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${large.toString('base64')}` } }] }] }, true));

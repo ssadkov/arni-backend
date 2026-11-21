@@ -48,6 +48,10 @@ try {
 	if ($LASTEXITCODE -ne 0) { throw 'Request client migration failed' }
 	& .\node_modules\.bin\prisma.cmd db execute --file deploy/billing/20261119-billing-markup-payments.sql --schema prisma/schema.prisma
 	if ($LASTEXITCODE -ne 0) { throw 'Markup and payment migration failed' }
+	& .\node_modules\.bin\prisma.cmd db execute --file deploy/billing/20261121-deepseek-bonus-wallet.sql --schema prisma/schema.prisma
+	if ($LASTEXITCODE -ne 0) { throw 'DeepSeek bonus migration failed' }
+	& .\node_modules\.bin\prisma.cmd db execute --file deploy/billing/20261121-deepseek-stream-metadata.sql --schema prisma/schema.prisma
+	if ($LASTEXITCODE -ne 0) { throw 'DeepSeek stream metadata migration failed' }
 	node scripts/test-billing.cjs
 	if ($LASTEXITCODE -ne 0) { throw 'Billing checks failed' }
 	node scripts/test-media.cjs
