@@ -41,7 +41,7 @@ const { encryptJWT } = require('../src/lib/jwt.ts');
 const { randomUUID } = require('node:crypto');
 const { billingRates } = require('../src/lib/billingCurrency.ts');
 const { mock } = require('node:test');
-const { PAID_DEEPSEEK_MODEL } = require('../src/lib/llm/trialModel.ts');
+const { PAID_DEEPSEEK_MODEL, TRIAL_PICKER_ID } = require('../src/lib/llm/trialModel.ts');
 const { DEEPSEEK_BONUS_KIND: BONUS_KIND, deepSeekBonusReport } = require('../src/lib/deepSeekBonus.ts');
 const { POST: grantBonus } = require('../src/app/api/admin/deepseek-bonus/grant/route.ts');
 const { GET: getAccount } = require('../src/app/api/account/route.ts');
@@ -549,28 +549,47 @@ async function main() {
 		}
 	});
 
-	await check('interrupted paid DeepSeek stream reconciles with OpenRouter generation metadata after the response', async () => {
+	await check('DeepSeek records interruption diagnostics and settles paid and trial streams with the correct key', async () => {
 		const { id } = await prisma.user.findUniqueOrThrow({ where: { email: 'bonus-payment@billing-test.invalid' } });
+		const trialUser = await prisma.user.create({ data: { email: 'trial-stream@billing-test.invalid' } });
 		process.env.OPENROUTER_PAID_API_KEY = 'mock-paid-key';
+		process.env.OPENROUTER_TRIAL_API_KEY = 'mock-trial-key';
+		process.env.DEEPSEEK_TRIAL_EMAILS = trialUser.email;
 		await prisma.billingMarkup.update({ where: { id: 'global' }, data: { percent: 5 } });
 		const originalLoad = Module._load;
 		const originalFetch = global.fetch;
+		const originalError = console.error;
+		const originalWarn = console.warn;
 		const tasks = [];
-		let lookups = 0;
+		const errors = [];
+		const warnings = [];
+		const lookups = [];
+		let mode = 'paid';
 		const file = require.resolve('../src/app/api/chat/completions/route.ts');
 		delete require.cache[file];
 		Module._load = function (name, parent, ...rest) {
 			if (name === 'next/server') { return { ...originalLoad.call(this, name, parent, ...rest), after: task => tasks.push(task) }; }
 			if (name === '@/lib/llm/openrouter') {
 				return { completeWithOpenRouter: async (body, key) => {
-					assert.equal(key, 'mock-paid-key');
-					assert.deepEqual(body.provider.max_price, { prompt: 0.1, completion: 0.6, request: 0 });
+					assert.equal(key, mode === 'trial' ? 'mock-trial-key' : 'mock-paid-key');
+					if (mode !== 'trial') { assert.deepEqual(body.provider.max_price, { prompt: 0.1, completion: 0.6, request: 0 }); }
+					const upstream = {
+						id: mode === 'missing-id' ? undefined : `gen-${mode}`,
+						provider: 'stream-host',
+						choices: mode === 'normal' ? [{ finish_reason: 'length' }] : mode === 'paid' ? [{ finish_reason: 'error' }] : [],
+						error: mode === 'paid' ? { code: 502, message: 'provider disconnected' } : undefined,
+						usage: mode === 'normal' ? { prompt_tokens: 100, completion_tokens: 6, cost: 0.002 } : undefined,
+					};
 					let sent = false;
 					return new Response(new ReadableStream({
 						pull(controller) {
-							if (sent) { controller.error(new Error('interrupted')); return; }
+							if (sent) {
+								if (mode === 'paid') { controller.error(new Error('interrupted')); }
+								else { controller.close(); }
+								return;
+							}
 							sent = true;
-							controller.enqueue(new TextEncoder().encode('data: {"id":"gen-local-check","choices":[]}\n\n'));
+							controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(upstream)}\n\n${mode === 'normal' ? 'data: [DONE]\n\n' : ''}`));
 						},
 					}));
 				} };
@@ -580,29 +599,70 @@ async function main() {
 		let chat;
 		try { chat = require(file).POST; } finally { Module._load = originalLoad; }
 		global.fetch = async (url, init) => {
-			if (String(url) !== 'https://openrouter.ai/api/v1/generation?id=gen-local-check') { return originalFetch(url, init); }
-			assert.equal(init.headers.Authorization, 'Bearer mock-paid-key');
-			lookups++;
+			const target = new URL(String(url));
+			if (target.origin !== 'https://openrouter.ai' || target.pathname !== '/api/v1/generation') { return originalFetch(url, init); }
+			const generation = target.searchParams.get('id');
+			lookups.push([generation, init.headers.Authorization]);
+			if (generation === 'gen-lookup-failed') { return new Response(null, { status: 401 }); }
 			return Response.json({ data: { total_cost: 0.002, native_tokens_prompt: 100, native_tokens_completion: 6, native_tokens_cached: 50, provider_name: 'mock' } });
 		};
-		try {
-			const token = await encryptJWT({ userId: id });
+		console.error = (message, ...rest) => message === 'OpenRouter stream interrupted' ? errors.push(JSON.parse(rest[0])) : originalError(message, ...rest);
+		console.warn = (message, ...rest) => message === 'OpenRouter output limit reached' ? warnings.push(JSON.parse(rest[0])) : originalWarn(message, ...rest);
+		const send = async (name, userId = id, model = PAID_DEEPSEEK_MODEL) => {
+			mode = name;
+			const token = await encryptJWT({ userId });
 			const response = await chat(new NextRequest('http://localhost/api/chat/completions', {
-				method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-				body: JSON.stringify({ model: PAID_DEEPSEEK_MODEL, messages: [{ role: 'user', content: 'hello' }], stream: true }),
+				method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'X-Arni-Chat-Id': name },
+				body: JSON.stringify({ model, messages: [{ role: 'user', content: 'do-not-log-this-message' }], stream: true }),
 			}));
 			assert.equal(response.status, 200);
-			await assert.rejects(response.text());
-			assert.equal(lookups, 0);
+			if (name === 'paid') { await assert.rejects(response.text()); }
+			else { await response.text(); }
+		};
+		const flush = () => Promise.all(tasks.splice(0).map(task => task()));
+		const usageRow = (chatId, userId = id) => prisma.usageLog.findFirstOrThrow({ where: { userId, chatId } });
+		try {
+			await send('paid');
+			assert.equal(lookups.length, 0);
 			assert.equal((await prisma.budgetReservation.findFirstOrThrow({ where: { userId: id } })).status, 'pending');
-			await Promise.all(tasks.map(task => task()));
-			assert.equal(lookups, 1);
-			const log = await prisma.usageLog.findFirstOrThrow({ where: { userId: id } });
+			await flush();
+			const log = await usageRow('paid');
 			assert.deepEqual([log.costMicros, log.providerCostMicros, log.accounting, log.costBasis, log.cacheReadTokens, log.walletMicros],
 				[2100, 2000, 'reported', 'provider_lookup', 50, 0]);
+			assert.deepEqual([log.generationId, log.region, log.finishReason, log.streamError],
+				['gen-paid', 'mock', 'error', '502: provider disconnected']);
+			assert.deepEqual(errors[0], { requestId: log.requestId, model: PAID_DEEPSEEK_MODEL, host: 'stream-host',
+				generationId: 'gen-paid', finishReason: 'error', streamError: '502: provider disconnected' });
+			for (const fallback of ['missing-id', 'lookup-failed']) {
+				await send(fallback);
+				await flush();
+				const estimate = await usageRow(fallback);
+				const reservation = await prisma.budgetReservation.findUniqueOrThrow({ where: { requestId: estimate.requestId } });
+				assert.deepEqual([estimate.accounting, estimate.costBasis, estimate.costMicros, estimate.streamError, estimate.region],
+					['estimated', 'reservation', reservation.reservedMicros, 'missing_done', 'stream-host']);
+			}
+			await send('normal');
+			await flush();
+			const normal = await usageRow('normal');
+			assert.deepEqual([normal.costMicros, normal.costBasis, normal.finishReason, normal.streamError], [2100, 'provider', 'length', null]);
+			assert.equal(warnings.length, 1);
+			assert.equal(warnings[0].requestId, normal.requestId);
+			await send('trial', trialUser.id, TRIAL_PICKER_ID);
+			await flush();
+			const trial = await usageRow('trial', trialUser.id);
+			assert.deepEqual([trial.costMicros, trial.accounting, trial.costBasis, trial.region, trial.streamError],
+				[2000, 'reported', 'provider_lookup', 'mock', 'missing_done']);
+			assert.equal(await prisma.budgetReservation.count({ where: { userId: trialUser.id } }), 0);
+			assert.deepEqual(lookups, [['gen-paid', 'Bearer mock-paid-key'], ['gen-lookup-failed', 'Bearer mock-paid-key'], ['gen-trial', 'Bearer mock-trial-key']]);
+			assert.equal(errors.length, 4);
+			assert.doesNotMatch(JSON.stringify(errors), /do-not-log-this-message/);
 		} finally {
 			global.fetch = originalFetch;
+			console.error = originalError;
+			console.warn = originalWarn;
 			delete process.env.OPENROUTER_PAID_API_KEY;
+			delete process.env.OPENROUTER_TRIAL_API_KEY;
+			delete process.env.DEEPSEEK_TRIAL_EMAILS;
 		}
 	});
 	console.log(`${passed} billing checks passed on disposable PostgreSQL.`);

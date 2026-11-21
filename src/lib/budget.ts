@@ -1,6 +1,6 @@
 import type { AccountBudget, BudgetWallet, Prisma } from '@prisma/client';
 import prisma from '@/lib/prisma';
-import { costMicros, usageCostMicros, currentWindow, staleReservationCutoff, FIVE_HOURS_MS, WEEK_MS, MAX_CONCURRENT_RESERVATIONS, type ReportedUsage } from './budgetPolicy';
+import { costMicros, usageCostMicros, currentWindow, staleReservationCutoff, FIVE_HOURS_MS, WEEK_MS, MAX_CONCURRENT_RESERVATIONS, type OpenRouterResponseMetadata, type ReportedUsage } from './budgetPolicy';
 import { applyMarkup } from './billingMarkup';
 import { bonusSnapshot, bonusWindows, deepSeekBonusEnabled, DEEPSEEK_BONUS_KIND, DEEPSEEK_BONUS_LEDGER } from './deepSeekBonus';
 import { PAID_DEEPSEEK_MODEL } from './llm/trialModel';
@@ -116,7 +116,8 @@ export async function reserveBudget(userId: string, model: string, source: strin
 }
 
 /** Missing usage stays charged at the reservation; only confirmed upstream rejection is refunded. */
-export async function settleBudget(id: string, usage: ReportedUsage | null, rejected = false, servedModel?: string, providerLookup = false) {
+export async function settleBudget(id: string, usage: ReportedUsage | null, rejected = false, servedModel?: string,
+	metadata?: OpenRouterResponseMetadata & { providerLookup?: boolean }) {
 	return prisma.$transaction(async tx => {
 		const initial = await tx.budgetReservation.findUniqueOrThrow({ where: { id } });
 		const budget = await lockBudget(tx, initial.userId);
@@ -172,8 +173,10 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 			await tx.usageLog.create({ data: { userId: budget.userId, model: billedModel, source: reservation.source, client: reservation.client,
 				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: charged, providerCostMicros: providerActual,
 				markupPercent: percent, walletMicros: walletActual, accounting: status,
-				costBasis: providerLookup ? 'provider_lookup' : !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
-				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation, region: usage?.host ?? reservation.region,
+				costBasis: metadata?.providerLookup ? 'provider_lookup' : !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
+				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation,
+				region: usage?.host ?? metadata?.host ?? reservation.region,
+				generationId: metadata?.generationId, finishReason: metadata?.finishReason, streamError: metadata?.streamError,
 				inputPerMillion: reservation.inputPerMillion, outputPerMillion: reservation.outputPerMillion,
 				...cacheUsage, cacheReadPerMillion: reservation.cacheReadPerMillion, cacheWritePerMillion: reservation.cacheWritePerMillion, chatId: reservation.chatId,
 				unitPriceMicros: reservation.unitPriceMicros, imageCount: reservation.imageCount } });

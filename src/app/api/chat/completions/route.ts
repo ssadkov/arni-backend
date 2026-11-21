@@ -23,7 +23,7 @@ import { BudgetError, reserveBudget, settleBudget } from '@/lib/budget';
 import { applyMarkup, markupPercentFor } from '@/lib/billingMarkup';
 import { CONTEXT_ERROR_MESSAGE, isContextError } from '@/lib/llm/contextError';
 import { budgetPrice, managedBody, type BudgetBody } from '@/lib/budgetPricing';
-import { openRouterGenerationId, validUsage, withHost, type ReportedUsage } from '@/lib/budgetPolicy';
+import { openRouterResponseMetadata, validUsage, withHost, type OpenRouterResponseMetadata, type ReportedUsage, type StreamMetadata } from '@/lib/budgetPolicy';
 import { usageStream } from '@/lib/usageStream';
 import { MAX_CHAT_BYTES, screenshotCount } from '@/lib/llm/vision';
 import { usageCostMicros } from '@/lib/budgetPolicy';
@@ -238,12 +238,12 @@ export async function POST(req: NextRequest) {
     }
     const catalogPrice = provider === 'bedrock' && forcedBedrockModel
       ? await prisma.bedrockModel.findUnique({ where: { id: forcedBedrockModel } }) : null;
-    const deepSeekKey = paidDeepSeek ? paidDeepSeekKey() : undefined;
+    const deepSeekKey = paidDeepSeek ? paidDeepSeekKey() : trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : undefined;
     upstreamDispatched = true;
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel, catalogPrice)
       : geminiPick ? await pickedGemini(body, geminiPick)
-      : await completeWithOpenRouter(await freeRequestBody(body), trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : deepSeekKey);
+      : await completeWithOpenRouter(await freeRequestBody(body), deepSeekKey);
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.
@@ -317,21 +317,12 @@ export async function POST(req: NextRequest) {
     // Шаг уже зарезервирован: ответ OpenRouter принят, даже если поток оборвётся.
     reservedUserId = null;
 
-    let lookupAfterResponse: (() => Promise<void>) | undefined;
-    const recordUsage = async (usage: ReportedUsage | null, generationId?: string) => {
+    const persistUsage = async (usage: ReportedUsage | null, metadata?: OpenRouterResponseMetadata, providerLookup = false) => {
       if (budgetReservationId) {
-        if (deepSeekKey && generationId && usage?.cost === undefined) {
-          const reservationId = budgetReservationId;
-          lookupAfterResponse = async () => {
-            const reported = await lookupOpenRouterGeneration(generationId, deepSeekKey);
-            await settleBudget(reservationId, reported ?? usage, false, servedModel, reported !== null);
-          };
-          return;
-        }
-        await settleBudget(budgetReservationId, usage, false, servedModel);
+        await settleBudget(budgetReservationId, usage, false, servedModel, { ...metadata, providerLookup });
         return;
       }
-      const missingUsage = !usage;
+      const missingUsage = !usage || (trialPick && usage.cost === undefined);
       // The DeepSeek test is logged like a free model, with OpenRouter's reported cost and serving host.
       const logOnly = isFreeModel || trialPick;
       if (!usage && !logOnly) { return; }
@@ -342,10 +333,12 @@ export async function POST(req: NextRequest) {
       const measuredCost = isFreeModel ? 0 : provider === 'openrouter' && usage.cost !== undefined ? Math.ceil(usage.cost * 1_000_000)
         : input != null && output != null ? usageCostMicros(usage, input, output, input * (modelCapabilities(servedModel).cache?.readMultiplier ?? 1), input * (modelCapabilities(servedModel).cache?.writeMultiplier ?? 1)) : null;
       const data = { userId: user.id, chatId, client, cacheReadTokens: usage.prompt_tokens_details?.cached_tokens || 0, cacheWriteTokens: usage.prompt_tokens_details?.cache_creation_input_tokens || 0, model: servedModel, requestedModel, requestId, promptTokens, completionTokens, source: usageSource,
-        // Upstream location: AWS region for Bedrock, serving host for the DeepSeek test.
-        imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : trialPick ? usage.host ?? null : null,
+        imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1'
+          : usageSource === 'openrouter' ? usage.host ?? metadata?.host : null,
+        generationId: metadata?.generationId, finishReason: metadata?.finishReason, streamError: metadata?.streamError,
         inputPerMillion: input, outputPerMillion: output, costMicros: measuredCost,
-        accounting: logOnly ? missingUsage ? 'estimated' : 'reported' : 'legacy', costBasis: measuredCost == null ? null : isFreeModel ? 'catalog' : provider === 'openrouter' ? 'provider' : 'catalog' };
+        accounting: logOnly ? missingUsage ? 'estimated' : 'reported' : 'legacy',
+        costBasis: providerLookup ? 'provider_lookup' : measuredCost == null ? null : isFreeModel ? 'catalog' : provider === 'openrouter' ? 'provider' : 'catalog' };
       if (logOnly) { await prisma.usageLog.create({ data }); }
       else {
         await prisma.$transaction([
@@ -355,9 +348,35 @@ export async function POST(req: NextRequest) {
       }
     };
 
+    let lookupAfterResponse: (() => Promise<void>) | undefined;
+    const recordUsage = async (usage: ReportedUsage | null, responseMetadata?: OpenRouterResponseMetadata | StreamMetadata) => {
+      const metadata = usageSource === 'openrouter' ? responseMetadata : undefined;
+      if (metadata) {
+        const diagnostic = {
+          requestId, model: servedModel, host: metadata.host ?? usage?.host ?? null, generationId: metadata.generationId ?? null,
+          finishReason: metadata.finishReason ?? null, streamError: metadata.streamError ?? null,
+        };
+        if ('completed' in metadata && (!metadata.completed || metadata.streamError)) {
+          console.error('OpenRouter stream interrupted', JSON.stringify(diagnostic));
+        }
+        if (metadata.finishReason === 'length') {
+          console.warn('OpenRouter output limit reached', JSON.stringify(diagnostic));
+        }
+      }
+      const generationId = metadata?.generationId;
+      if (deepSeekKey && generationId && usage?.cost === undefined) {
+        lookupAfterResponse = async () => {
+          const reported = await lookupOpenRouterGeneration(generationId, deepSeekKey);
+          await persistUsage(reported ?? usage, metadata, reported !== null);
+        };
+        return;
+      }
+      await persistUsage(usage, metadata);
+    };
+
     // 5. Обработка стриминга и перехват использования токенов
     if (body.stream) {
-      if (!response.body) { await recordUsage(null); throw new Error('Empty upstream stream'); }
+      if (!response.body) { await recordUsage(null, { completed: false, streamError: 'empty_stream' }); throw new Error('Empty upstream stream'); }
       const monitored = usageStream(response.body, recordUsage);
       after(async () => {
         await monitored.completed;
@@ -376,7 +395,7 @@ export async function POST(req: NextRequest) {
 
     // 6. Обработка обычного (не потокового) запроса
     const json = await response.json();
-    await recordUsage(withHost(validUsage(json.usage), json.provider), openRouterGenerationId(json.id));
+    await recordUsage(withHost(validUsage(json.usage), json.provider), openRouterResponseMetadata(json));
     if (lookupAfterResponse) { after(lookupAfterResponse); }
 
     return NextResponse.json(json, {

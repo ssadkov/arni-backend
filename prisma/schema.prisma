@@ -99,6 +99,9 @@ model UsageLog {
   markupPercent    Int      @default(0)
   accounting       String? // reported, estimated, or legacy
   costBasis        String? // provider, provider_lookup, catalog, reservation
+  generationId     String?
+  finishReason     String?
+  streamError      String?
   requestId        String? @unique
   requestedModel   String?
   operation        String @default("chat")
