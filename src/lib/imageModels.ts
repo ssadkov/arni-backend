@@ -40,6 +40,29 @@ export const IMAGE_MODELS: readonly ImageModelCard[] = [
 	},
 ];
 
+/**
+ * Edits an uploaded picture, so it is not in IMAGE_MODELS. It is called through a US inference profile from
+ * IMAGE_REGION. Limits are from the AWS model card.
+ */
+export const BACKGROUND_REMOVAL = {
+	id: 'us.stability.stable-image-remove-background-v1:0',
+	name: 'Убрать фон',
+	modelName: 'Stable Image Remove Background',
+	costMicros: 70_000,
+	minSide: 64,
+	maxPixels: 9_437_184,
+	maxAspect: 2.5,
+} as const;
+
+/** Why the model would refuse a picture of this size, or null when it fits. */
+export function backgroundRemovalProblem(width: number, height: number): string | null {
+	const { minSide, maxPixels, maxAspect } = BACKGROUND_REMOVAL;
+	if (Math.min(width, height) < minSide) { return `Картинка слишком маленькая: каждая сторона должна быть не меньше ${minSide} пикселей.`; }
+	if (width * height > maxPixels) { return 'Картинка слишком большая: чтобы убрать фон, нужно не больше 9,4 мегапикселя.'; }
+	if (Math.max(width, height) / Math.min(width, height) > maxAspect) { return 'Картинка слишком вытянутая: стороны могут отличаться не больше чем в 2,5 раза.'; }
+	return null;
+}
+
 /** Default for omitted `model` — keeps older Arni Code / web clients working. */
 export const IMAGE_MODEL = IMAGE_MODELS[0].id;
 export const IMAGE_PRICE_MICROS = IMAGE_MODELS[0].costMicros;

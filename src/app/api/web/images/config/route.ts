@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { BudgetError } from '@/lib/budget';
 import { applyMarkup, markupPercentFor } from '@/lib/billingMarkup';
 import { imageCatalogPublic } from '@/lib/imageGeneration';
+import { BACKGROUND_REMOVAL } from '@/lib/imageModels';
 import prisma from '@/lib/prisma';
 import { webJson, webOptions } from '@/lib/webCors';
 import { webUser } from '@/lib/webSession';
@@ -25,7 +26,10 @@ export async function GET(req: NextRequest) {
 			return { ...model, costMicros: applyMarkup(model.costMicros, percent) };
 		}));
 		const defaultModel = models.find(model => model.id === catalog.default_model) ?? models[0];
-		return webJson(req, { enabled, ...catalog, costMicros: defaultModel?.costMicros ?? catalog.costMicros, models });
+		const { id, name, costMicros } = BACKGROUND_REMOVAL;
+		const editPercent = await markupPercentFor({ source: 'bedrock', model: id, operation: 'image' });
+		const backgroundRemoval = { name, costMicros: applyMarkup(costMicros, editPercent) };
+		return webJson(req, { enabled, ...catalog, costMicros: defaultModel?.costMicros ?? catalog.costMicros, models, backgroundRemoval });
 	} catch (error) {
 		const known = error instanceof BudgetError;
 		return webJson(

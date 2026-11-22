@@ -1,7 +1,8 @@
 import { NextRequest } from 'next/server';
 import { POST as completeChat } from '@/app/api/chat/completions/route';
 import { BudgetError } from '@/lib/budget';
-import { generateImage } from '@/lib/imageGeneration';
+import { generateImage, removeBackground } from '@/lib/imageGeneration';
+import { BACKGROUND_REMOVAL, IMAGE_MAX_BYTES } from '@/lib/imageModels';
 import { decodeScreenshot } from '@/lib/llm/vision';
 import prisma from '@/lib/prisma';
 import { searchConfigured, searchWeb, type WebSearchHit } from '@/lib/webSearch';
@@ -282,6 +283,45 @@ export function textFromSse(chunk: string) {
 		}
 	}
 	return text;
+}
+
+/**
+ * Removes the background of an uploaded, not yet sent picture and saves both as a turn. The request key follows
+ * from the picture, so a double click or a lost response replays the same paid result instead of buying another.
+ */
+export async function removeChatImageBackground(userId: string, chatId: string, imageId: string) {
+	const chat = await ownChat(userId, chatId);
+	const source = await readOwnedImage(userId, imageId);
+	if (source.messageId) {
+		throw new BudgetError('image_used', 'Эта картинка уже прикреплена к сообщению.', 409);
+	}
+	// Check the space before paying: the result can be up to IMAGE_MAX_BYTES.
+	await assertImageQuota(userId, IMAGE_MAX_BYTES);
+	const bytes = Buffer.from(source.bytes);
+	const { width, height } = decodeScreenshot(`data:${source.mediaType};base64,${bytes.toString('base64')}`);
+	const keyPrefix = `rmbg-${imageId}-`;
+	// Only a failed attempt gets a new key.
+	const failed = await prisma.mediaGeneration.count({ where: { userId, status: 'failed', requestKey: { startsWith: keyPrefix } } });
+	const edited = await removeBackground(userId, `${keyPrefix}${failed}`, { bytes, width, height }, chatId, 'web');
+	const stored = await prisma.mediaGeneration.findFirst({ where: { id: edited.id, userId, status: 'succeeded' } });
+	const png = stored?.image;
+	if (!png) {
+		throw new BudgetError('image_failed', 'Картинка не сохранилась.', 502);
+	}
+	return prisma.$transaction(async tx => {
+		const sentAt = new Date();
+		const question = await tx.webMessage.create({ data: { chatId, role: 'user', text: BACKGROUND_REMOVAL.name, createdAt: sentAt } });
+		const attached = await tx.webImage.updateMany({ where: { id: imageId, userId, messageId: null }, data: { messageId: question.id } });
+		if (!attached.count) {
+			throw new BudgetError('image_used', 'Эта картинка уже прикреплена к сообщению.', 409);
+		}
+		const answer = await tx.webMessage.create({ data: { chatId, role: 'assistant', text: '', createdAt: new Date(sentAt.getTime() + 1) } });
+		const result = await tx.webImage.create({
+			data: { userId, messageId: answer.id, mediaType: 'image/png', byteSize: png.length, bytes: png },
+		});
+		await tx.webChat.update({ where: { id: chatId }, data: chat.title ? { updatedAt: sentAt } : { title: BACKGROUND_REMOVAL.name } });
+		return { userMessageId: question.id, messageId: answer.id, imageId: result.id };
+	});
 }
 
 export async function generateChatImage(

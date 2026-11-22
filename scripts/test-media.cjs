@@ -39,6 +39,7 @@ runtime.BedrockRuntimeClient.prototype.send = async function (command) {
 	if (command instanceof runtime.CountTokensCommand) { countCalls++; if (mode === 'count-failed') { throw new Error('Unsupported'); } return { inputTokens: 2000 }; }
 	invocations++;
 	if (mode === 'rejected') { throw Object.assign(new Error('Denied'), { $metadata: { httpStatusCode: 403 } }); }
+	if (mode === 'busy') { throw Object.assign(new Error('Too many requests'), { $metadata: { httpStatusCode: 429 } }); }
 	if (mode === 'timeout') { throw new Error('Unknown outcome'); }
 	if (mode === 'filtered') { return { body: Buffer.from(JSON.stringify({ images: [], finish_reasons: ['CONTENT_FILTERED'] })) }; }
 	return { body: Buffer.from(JSON.stringify({ images: [png], seeds: [42], finish_reasons: [null] })) };
@@ -48,6 +49,8 @@ const { toConverse } = require('../src/lib/llm/bedrock.ts');
 const { generateImage, IMAGE_PRICE_MICROS, IMAGE_MODEL, imageCatalogPublic } = require('../src/lib/imageGeneration.ts');
 const { IMAGE_MODELS } = require('../src/lib/imageModels.ts');
 const { fitImagePng } = require('../src/lib/imagePng.ts');
+const { removeChatImageBackground, storeImage } = require('../src/lib/webTurn.ts');
+const { BACKGROUND_REMOVAL, backgroundRemovalProblem } = require('../src/lib/imageModels.ts');
 const { reserveBudget, settleBudget } = require('../src/lib/budget.ts');
 const TEXT_IMAGE_MODEL = IMAGE_MODELS.find(row => row.purpose === 'text').id;
 const TEXT_IMAGE_PRICE = IMAGE_MODELS.find(row => row.purpose === 'text').costMicros;
@@ -317,6 +320,44 @@ async function main() {
 		assert.equal(body.mode, 'text-to-image');
 		const log = await prisma.usageLog.findUniqueOrThrow({ where: { requestId: created.id } });
 		assert.deepEqual([log.model, log.unitPriceMicros, log.costMicros, log.chatId], [TEXT_IMAGE_MODEL, TEXT_IMAGE_PRICE, TEXT_IMAGE_PRICE, 'desktop-chat-1']);
+	});
+	await check('web background removal: busy refunds, double click and replay charge once, result follows the source', async () => {
+		const chat = await prisma.webChat.create({ data: { userId } });
+		const source = await storeImage(userId, imagePart.image_url.url);
+		const balance = async () => (await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros;
+		const start = await balance();
+
+		mode = 'busy';
+		await assert.rejects(removeChatImageBackground(userId, chat.id, source.id), error => error.code === 'image_busy' && error.status === 429);
+		assert.equal(await balance(), start, 'a throttled edit returns the reserve');
+		assert.equal((await prisma.webImage.findUniqueOrThrow({ where: { id: source.id } })).messageId, null, 'the attachment stays usable');
+
+		mode = 'success';
+		const before = invocations;
+		const clicks = await Promise.allSettled([removeChatImageBackground(userId, chat.id, source.id), removeChatImageBackground(userId, chat.id, source.id)]);
+		const done = clicks.filter(click => click.status === 'fulfilled');
+		assert.equal(done.length, 1);
+		await assert.rejects(removeChatImageBackground(userId, chat.id, source.id), error => error.code === 'image_used');
+
+		const messages = await prisma.webMessage.findMany({ where: { chatId: chat.id }, orderBy: { createdAt: 'asc' }, include: { images: true } });
+		const log = await prisma.usageLog.findFirstOrThrow({ where: { userId, chatId: chat.id, model: BACKGROUND_REMOVAL.id }, orderBy: { createdAt: 'desc' } });
+		assert.deepEqual({
+			invoked: invocations - before,
+			model: captured.modelId,
+			payload: JSON.parse(Buffer.from(captured.body).toString()),
+			spent: start - await balance(),
+			log: [log.operation, log.costMicros, log.client],
+			turn: messages.map(message => [message.role, message.text, message.images.map(item => item.id)]),
+		}, {
+			invoked: 1,
+			model: BACKGROUND_REMOVAL.id,
+			payload: { image: png, output_format: 'png' },
+			spent: BACKGROUND_REMOVAL.costMicros,
+			log: ['image', BACKGROUND_REMOVAL.costMicros, 'web'],
+			turn: [['user', 'Убрать фон', [source.id]], ['assistant', '', [done[0].value.imageId]]],
+		});
+		assert.deepEqual([[64, 64], [63, 64], [3073, 3072], [640, 1600], [640, 1601]].map(([width, height]) => backgroundRemovalProblem(width, height) === null),
+			[true, false, false, true, false]);
 	});
 	await check('oversized PNG is compressed under the product byte limit', async () => {
 		const sharp = require('sharp');

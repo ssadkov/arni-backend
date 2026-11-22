@@ -4,6 +4,8 @@ import prisma from '@/lib/prisma';
 import { BudgetError, reserveBudget, settleBudget } from './budget';
 import { applyMarkup, markupPercentFor } from './billingMarkup';
 import {
+	BACKGROUND_REMOVAL,
+	backgroundRemovalProblem,
 	IMAGE_MODEL,
 	IMAGE_PRICE_MICROS,
 	IMAGE_RATIOS,
@@ -73,13 +75,69 @@ async function result(row: { id: string; model: string; status: string; errorCod
 	return { id: row.id, model: row.model, costMicros: usage?.costMicros ?? null, data: [{ url: `/api/images/${row.id}`, mime_type: 'image/png' }] };
 }
 
+/** One paid InvokeModel call that returns one PNG: a generation or an edit. */
+type ImageJob = {
+	model: string;
+	modelName: string;
+	costMicros: number;
+	payloadHash: string;
+	payload: Record<string, string>;
+	/** Refuses the request once the feature is known to be on, before any money is reserved. */
+	validate?: () => void;
+};
+
 /** `chatId` attributes the charge to the desktop chat, so its cost shows in "Последний чат". */
 export async function generateImage(userId: string, requestKey: string, body: unknown, chatId?: string, reportedClient?: string | null) {
-	const app = requestClient(reportedClient);
-	if (!/^[a-zA-Z0-9_-]{16,100}$/.test(requestKey)) { throw new BudgetError('idempotency_key_required', 'Нужен Idempotency-Key длиной 16–100 символов.', 400); }
+	assertRequestKey(requestKey);
 	const input = imageRequest(body);
 	const card = imageModelCard(input.model);
-	const payloadHash = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+	return runImageJob(userId, requestKey, {
+		model: card.id,
+		modelName: card.modelName,
+		costMicros: card.costMicros,
+		payloadHash: createHash('sha256').update(JSON.stringify(input)).digest('hex'),
+		payload: invokePayload(card, input),
+		validate: () => {
+			// Stability rejects Cyrillic prompts before billing us a useful image; stop before reserve/InvokeModel.
+			if (promptHasUnsupportedScript(input.prompt)) {
+				throw new BudgetError(
+					'image_prompt_language',
+					'Модели Stability сейчас отклоняют описание на русском. Перепишите prompt на английском — тогда генерация пройдёт без лишнего списания.',
+					400,
+				);
+			}
+		},
+	}, chatId, reportedClient);
+}
+
+/** Returns the picture as a PNG with a transparent background, billed like a generation. */
+export async function removeBackground(
+	userId: string,
+	requestKey: string,
+	source: { bytes: Uint8Array; width: number; height: number },
+	chatId?: string,
+	reportedClient?: string | null,
+) {
+	assertRequestKey(requestKey);
+	const problem = backgroundRemovalProblem(source.width, source.height);
+	if (problem) { throw new BudgetError('invalid_image_size', problem, 400); }
+	const { id, modelName, costMicros } = BACKGROUND_REMOVAL;
+	return runImageJob(userId, requestKey, {
+		model: id,
+		modelName,
+		costMicros,
+		payloadHash: createHash('sha256').update(id).update(source.bytes).digest('hex'),
+		payload: { image: Buffer.from(source.bytes).toString('base64'), output_format: 'png' },
+	}, chatId, reportedClient);
+}
+
+function assertRequestKey(requestKey: string) {
+	if (!/^[a-zA-Z0-9_-]{16,100}$/.test(requestKey)) { throw new BudgetError('idempotency_key_required', 'Нужен Idempotency-Key длиной 16–100 символов.', 400); }
+}
+
+async function runImageJob(userId: string, requestKey: string, job: ImageJob, chatId?: string, reportedClient?: string | null) {
+	const app = requestClient(reportedClient);
+	const { payloadHash } = job;
 	const previous = await prisma.mediaGeneration.findUnique({ where: { userId_requestKey: { userId, requestKey } } });
 	if (previous) {
 		if (previous.payloadHash !== payloadHash) { throw new BudgetError('idempotency_conflict', 'Ключ уже использован с другим описанием.', 409); }
@@ -88,20 +146,13 @@ export async function generateImage(userId: string, requestKey: string, body: un
 	if (process.env.ARNI_IMAGE_GENERATION_ENABLED !== 'true' || !process.env.AWS_BEARER_TOKEN_BEDROCK_IMAGES) {
 		throw new BudgetError('image_generation_disabled', 'Генерация изображений пока не включена. Администратору нужно активировать модели в AWS us-west-2 и настроить backend.', 503);
 	}
-	// Stability rejects Cyrillic prompts before billing us a useful image; stop before reserve/InvokeModel.
-	if (promptHasUnsupportedScript(input.prompt)) {
-		throw new BudgetError(
-			'image_prompt_language',
-			'Модели Stability сейчас отклоняют описание на русском. Перепишите prompt на английском — тогда генерация пройдёт без лишнего списания.',
-			400,
-		);
-	}
+	job.validate?.();
 	// Budget is mandatory: free chat access never enables paid image generation.
-	if (!await prisma.accountBudget.findUnique({ where: { userId } })) { throw new BudgetError('image_budget_required', 'Для генерации изображений пополните баланс в аккаунте.', 403); }
+	if (!await prisma.accountBudget.findUnique({ where: { userId } })) { throw new BudgetError('image_budget_required', 'Для работы с изображениями пополните баланс в аккаунте.', 403); }
 	let row;
 	try {
 		row = await prisma.mediaGeneration.create({
-			data: { userId, requestKey, payloadHash, model: card.id, region: IMAGE_REGION },
+			data: { userId, requestKey, payloadHash, model: job.model, region: IMAGE_REGION },
 		});
 	} catch (error) {
 		if ((error as { code?: string }).code !== 'P2002') { throw error; }
@@ -113,14 +164,14 @@ export async function generateImage(userId: string, requestKey: string, body: un
 	let reservationId: string | undefined;
 	let dispatched = false;
 	try {
-		const markupPercent = await markupPercentFor({ source: 'bedrock', model: card.id, operation: 'image' });
-		const reservation = await reserveBudget(userId, card.id, 'bedrock', applyMarkup(card.costMicros, markupPercent), 0, 0, {
+		const markupPercent = await markupPercentFor({ source: 'bedrock', model: job.model, operation: 'image' });
+		const reservation = await reserveBudget(userId, job.model, 'bedrock', applyMarkup(job.costMicros, markupPercent), 0, 0, {
 			requestId: row.id,
-			requestedModel: card.id,
+			requestedModel: job.model,
 			chatId,
 			operation: 'image',
 			region: IMAGE_REGION,
-			unitPriceMicros: card.costMicros,
+			unitPriceMicros: job.costMicros,
 			imageCount: 1,
 			client: app,
 			markupPercent,
@@ -131,10 +182,10 @@ export async function generateImage(userId: string, requestKey: string, body: un
 		const runtime = client(IMAGE_REGION, 1, process.env.AWS_BEARER_TOKEN_BEDROCK_IMAGES);
 		dispatched = true;
 		const output = await runtime.send(new InvokeModelCommand({
-			modelId: card.id,
+			modelId: job.model,
 			contentType: 'application/json',
 			accept: 'application/json',
-			body: JSON.stringify(invokePayload(card, input)),
+			body: JSON.stringify(job.payload),
 		}), { abortSignal: AbortSignal.timeout(180_000) }).finally(() => runtime.destroy());
 		const data = JSON.parse(new TextDecoder().decode(output.body)) as {
 			images?: string[];
@@ -149,7 +200,7 @@ export async function generateImage(userId: string, requestKey: string, body: un
 				: '';
 			throw new BudgetError(
 				'image_filtered',
-				`Модель ${card.modelName} не вернула изображение${filter ? ` (${filter})` : ''}. Запрос не повторяется автоматически.${languageHint}`,
+				`Модель ${job.modelName} не вернула изображение${filter ? ` (${filter})` : ''}. Запрос не повторяется автоматически.${languageHint}`,
 				422,
 			);
 		}
@@ -172,9 +223,9 @@ export async function generateImage(userId: string, requestKey: string, body: un
 		const saved = await prisma.mediaGeneration.update({ where: { id: row.id }, data: { status: 'succeeded' } });
 		await recordModelRequest({
 			userId,
-			model: card.id,
+			model: job.model,
 			requestId: row.id,
-			requestedModel: card.id,
+			requestedModel: job.model,
 			source: 'bedrock',
 			region: IMAGE_REGION,
 			operation: 'image',
@@ -187,13 +238,13 @@ export async function generateImage(userId: string, requestKey: string, body: un
 		const status = (error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
 		const rejected = !dispatched || status != null && status >= 400 && status < 500 && status !== 408;
 		if (reservationId) { await settleBudget(reservationId, null, rejected); }
-		const code = error instanceof BudgetError ? error.code : status === 403 ? 'image_access_denied' : 'image_upstream_failed';
+		const code = error instanceof BudgetError ? error.code : status === 403 ? 'image_access_denied' : status === 429 ? 'image_busy' : 'image_upstream_failed';
 		await prisma.mediaGeneration.update({ where: { id: row.id }, data: { status: 'failed', errorCode: code } });
 		await recordModelRequest({
 			userId,
-			model: card.id,
+			model: job.model,
 			requestId: row.id,
-			requestedModel: card.id,
+			requestedModel: job.model,
 			source: 'bedrock',
 			region: IMAGE_REGION,
 			operation: 'image',
@@ -203,6 +254,8 @@ export async function generateImage(userId: string, requestKey: string, body: un
 			client: app,
 		});
 		if (error instanceof BudgetError) { throw error; }
+		// AWS allows only a few image requests a minute for the whole account; a 4xx returns the reserve.
+		if (status === 429) { throw new BudgetError(code, 'Сервис картинок сейчас занят. Деньги не списаны, повторите через минуту.', 429); }
 		throw new BudgetError(
 			code,
 			status === 403
