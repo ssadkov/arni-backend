@@ -72,6 +72,7 @@ let imageMode = false;
 let imageModels: ImageGenModel[] = [];
 let imageGenEnabled: boolean | null = null;
 let imageGenDefault = '';
+let backgroundRemoval: { name: string; costMicros: number } | null = null;
 let sending = false;
 let opening = false;
 let chatListRequest = 0;
@@ -168,13 +169,16 @@ async function refreshImageConfig() {
       enabled?: boolean;
       default_model?: string;
       models?: ImageGenModel[];
+      backgroundRemoval?: { name: string; costMicros: number };
     };
+    backgroundRemoval = body.backgroundRemoval ?? null;
     imageGenEnabled = body.enabled === true;
     imageGenDefault = body.default_model || '';
     imageModels = Array.isArray(body.models) ? body.models : [];
   } catch {
     imageGenEnabled = false;
     imageModels = [];
+    backgroundRemoval = null;
   }
   if (document.querySelector('#composer')) {
     paintImageGenModels();
@@ -441,6 +445,7 @@ function renderApp() {
             <div id="attachment" class="attachment" hidden>
               <img id="file-preview" alt="" />
               <span id="file-name"></span>
+              <button id="remove-background" class="attachment-action" type="button" hidden></button>
               <button id="remove-file" class="icon-button" type="button" aria-label="Убрать изображение">${icon('close')}</button>
             </div>
             <label class="sr-only" for="input">Сообщение</label>
@@ -533,7 +538,11 @@ function renderApp() {
   document.querySelector('#hide-chats')?.addEventListener('click', () => setChatsOpen(false));
   document.querySelector('#backdrop')?.addEventListener('click', () => setChatsOpen(false));
   document.querySelector('#chat-search')?.addEventListener('input', paintChats);
-  document.querySelector('#thread')?.addEventListener('click', event => void copyMessage(event));
+  document.querySelector('#thread')?.addEventListener('click', event => {
+    void copyMessage(event);
+    void downloadImage(event);
+  });
+  document.querySelector('#remove-background')?.addEventListener('click', () => void removeBackground());
   document.querySelector<HTMLFormElement>('#composer')?.addEventListener('submit', event => {
     event.preventDefault();
     void send(imageMode);
@@ -776,6 +785,11 @@ function paintComposer() {
   document.querySelector<HTMLButtonElement>('#image-mode')!.disabled = sending || opening;
   document.querySelector<HTMLElement>('#attachment')!.hidden = !pendingImage || imageMode;
   document.querySelector<HTMLButtonElement>('#remove-file')!.disabled = sending || opening;
+  const backgroundButton = document.querySelector<HTMLButtonElement>('#remove-background')!;
+  // Older APIs and failed config requests send no price: no price, no paid button.
+  backgroundButton.hidden = !backgroundRemoval;
+  backgroundButton.disabled = sending || opening;
+  backgroundButton.textContent = backgroundRemoval ? `${backgroundRemoval.name} · ${money(backgroundRemoval.costMicros)}` : '';
   document.querySelector<HTMLButtonElement>('#show-tools')!.disabled = sending || opening;
   const modelTrigger = document.querySelector<HTMLButtonElement>('#show-models')!;
   modelTrigger.hidden = imageMode;
@@ -806,7 +820,7 @@ function paintMessages() {
   thread.innerHTML = messages.map((message, index) => {
     const user = message.role === 'user';
     const author = user ? 'Вы' : 'Arni';
-    const images = message.images.map(image => `<img data-image="${escapeHtml(image.id)}" alt="${user ? 'Прикреплённое изображение' : 'Изображение от Арни'}" />`).join('');
+    const images = message.images.map(image => `<img data-image="${escapeHtml(image.id)}" alt="${user ? 'Прикреплённое изображение' : 'Изображение от Арни'}" />${user ? '' : `<button class="download-image" type="button" data-download="${escapeHtml(image.id)}">Скачать PNG</button>`}`).join('');
     const links = message.sources?.filter(hit => /^https?:\/\//i.test(hit.url));
     const sources = links?.length ? `<ol class="sources">${links.map(hit => `<li><a href="${escapeHtml(hit.url)}" target="_blank" rel="noreferrer">${escapeHtml(hit.title)}</a></li>`).join('')}</ol>` : '';
     const copy = message.text ? `<button class="icon-button copy-button" type="button" data-copy-index="${index}" aria-label="Копировать сообщение" title="Копировать сообщение">${icon('copy')}</button>` : '';
@@ -817,7 +831,12 @@ function paintMessages() {
     </article>`;
   }).join('');
   thread.querySelectorAll<HTMLImageElement>('img[data-image]').forEach(image => {
-    void loadImage(image);
+    void loadImage(image).then(() => {
+      // An image has no height until it loads, so the first scroll leaves a fresh result below the fold.
+      if (image.isConnected) {
+        thread.scrollTop = thread.scrollHeight;
+      }
+    });
   });
   thread.scrollTop = thread.scrollHeight;
 }
@@ -848,10 +867,32 @@ async function loadImage(image: HTMLImageElement) {
     if (response.ok && image.isConnected) {
       const url = URL.createObjectURL(await response.blob());
       image.src = url;
-      void image.decode().catch(() => undefined).finally(() => URL.revokeObjectURL(url));
+      await image.decode().catch(() => undefined);
+      URL.revokeObjectURL(url);
     }
   } catch {
     // Keep the image's alternative text if the download fails.
+  }
+}
+
+/** The preview's blob URL is revoked after decoding, so saving needs its own request. */
+async function downloadImage(event: Event) {
+  const id = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-download]')?.dataset.download : undefined;
+  if (!id) {
+    return;
+  }
+  try {
+    const response = await api(`/api/web/images/${id}`);
+    if (!response.ok) {
+      throw new Error(await errorMessage(response));
+    }
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(await response.blob());
+    link.download = `arni-${id.slice(0, 8)}.png`;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+  } catch {
+    setStatus('Не удалось скачать картинку. Попробуйте ещё раз.', true);
   }
 }
 
@@ -1015,7 +1056,7 @@ function attachFile() {
   document.querySelector<HTMLImageElement>('#file-preview')!.src = pendingImage.preview;
   document.querySelector('#file-name')!.textContent = file.name;
   const model = models.find(item => item.id === selectedModel());
-  setStatus(model && !supportsImage(model) ? 'Для вложения выберите модель с поддержкой изображений.' : '');
+  setStatus(model && !supportsImage(model) ? 'Чтобы отправить картинку в чат, выберите модель с поддержкой изображений.' : '');
   paintComposer();
 }
 
@@ -1035,6 +1076,70 @@ async function uploadImage(image: NonNullable<typeof pendingImage>) {
     image.id = body.id;
   }
   return image.id;
+}
+
+async function ensureChat() {
+  if (!activeId) {
+    const response = await api('/api/web/chats', { method: 'POST' });
+    if (!response.ok) {
+      throw new Error(await errorMessage(response));
+    }
+    const chat = await response.json() as Chat;
+    activeId = chat.id;
+    chats.unshift(chat);
+    paintChats();
+  }
+  return activeId;
+}
+
+function finishRequest() {
+  sending = false;
+  paintMessages();
+  paintComposer();
+  paintChats();
+  void refreshChats();
+  void refreshAccount().then(() => { paintLimits(); paintModels(); }).catch(() => undefined);
+}
+
+/** Needs no chat model and leaves the typed draft alone. */
+async function removeBackground() {
+  const image = pendingImage;
+  if (sending || opening || !image || !backgroundRemoval) {
+    return;
+  }
+  if (imageGenEnabled === false) {
+    setStatus('Чтобы убрать фон, нужен действующий баланс: пополните его в меню аккаунта.', true);
+    return;
+  }
+  sending = true;
+  setToolsOpen(false);
+  setStatus('Убираем фон…');
+  paintChats();
+  paintComposer();
+  let chatId = '';
+  try {
+    chatId = await ensureChat();
+    const imageId = await uploadImage(image);
+    const response = await api(`/api/web/chats/${chatId}/background`, { method: 'POST', body: JSON.stringify({ imageId }) });
+    if (!response.ok) {
+      throw new Error(await errorMessage(response));
+    }
+    clearAttachment();
+    await loadChat(chatId);
+    setStatus('');
+  } catch (error) {
+    if (chatId && image.id) {
+      // The answer can be lost after the result was saved; then the picture is already in the chat.
+      await loadChat(chatId).then(() => {
+        if (pendingImage === image && messages.some(message => message.images.some(item => item.id === image.id))) {
+          clearAttachment();
+        }
+      }).catch(() => undefined);
+    }
+    setStatus(error instanceof Error ? error.message : 'Не удалось убрать фон.', true);
+  } finally {
+    finishRequest();
+  }
 }
 
 async function send(draw: boolean) {
@@ -1071,17 +1176,7 @@ async function send(draw: boolean) {
   paintComposer();
   let submitted = false;
   try {
-    if (!activeId) {
-      const response = await api('/api/web/chats', { method: 'POST' });
-      if (!response.ok) {
-        throw new Error(await errorMessage(response));
-      }
-      const chat = await response.json() as Chat;
-      activeId = chat.id;
-      chats.unshift(chat);
-      paintChats();
-    }
-
+    await ensureChat();
     const imageId = image ? await uploadImage(image) : undefined;
     const path = draw ? 'images' : 'messages';
     const payload = draw
@@ -1122,12 +1217,7 @@ async function send(draw: boolean) {
     }
     setStatus(error instanceof Error ? error.message : 'Не удалось отправить сообщение.', true);
   } finally {
-    sending = false;
-    paintMessages();
-    paintComposer();
-    paintChats();
-    void refreshChats();
-    void refreshAccount().then(() => { paintLimits(); paintModels(); }).catch(() => undefined);
+    finishRequest();
   }
 }
 

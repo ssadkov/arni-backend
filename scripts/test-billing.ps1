@@ -52,6 +52,8 @@ try {
 	if ($LASTEXITCODE -ne 0) { throw 'DeepSeek bonus migration failed' }
 	& .\node_modules\.bin\prisma.cmd db execute --file deploy/billing/20261121-deepseek-stream-metadata.sql --schema prisma/schema.prisma
 	if ($LASTEXITCODE -ne 0) { throw 'DeepSeek stream metadata migration failed' }
+	& .\node_modules\.bin\prisma.cmd db execute --file deploy/web-chat/20261101-web-chat.sql --schema prisma/schema.prisma
+	if ($LASTEXITCODE -ne 0) { throw 'Web chat migration failed' }
 	node scripts/test-billing.cjs
 	if ($LASTEXITCODE -ne 0) { throw 'Billing checks failed' }
 	node scripts/test-media.cjs

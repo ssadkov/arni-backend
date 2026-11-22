@@ -284,6 +284,13 @@ button.primary:hover:not(:disabled), .actions a.primary:hover {
 .image-gen-option small { display: block; color: var(--muted); font-size: 0.8125rem; }
 .attachment { width: fit-content; max-width: 100%; margin: 0.25rem 0.25rem 0.5rem; padding: 0.25rem; border-radius: 0.75rem; }
 .attachment img { flex: none; width: 2.75rem; height: 2.75rem; object-fit: cover; border-radius: 0.5rem; }
+.attachment #file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-action { flex: none; white-space: nowrap; background: var(--panel); border-color: var(--line); }
+.attachment-action[hidden] { display: none; }
+.bubble .download-image { display: block; width: fit-content; margin-top: 0.5rem; font-size: 0.875rem; }
+@media (max-width: 420px) {
+  .attachment #file-name { display: none; }
+}
 .composer-status { padding: 0.5rem 0.75rem 0.125rem; font-size: 0.875rem; overflow-wrap: anywhere; }
 .composer-status:not(.error) { color: var(--muted); }
 
