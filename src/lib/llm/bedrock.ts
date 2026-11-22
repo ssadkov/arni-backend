@@ -569,6 +569,9 @@ function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: strin
 				controller.enqueue(encoder.encode('data: [DONE]\n\n'));
 				controller.close();
 			} catch (error) {
+				// The route only sees a broken stream; this is the one place that knows why.
+				const reason = error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 300) : 'unknown';
+				console.error('Bedrock stream interrupted', JSON.stringify({ model: modelId, reason }));
 				controller.error(error);
 			}
 		},

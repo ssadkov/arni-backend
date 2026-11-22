@@ -15,9 +15,10 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
 		return NextResponse.json({ error: 'Запрос ещё может выполняться. Закрытие доступно через 10 минут.' }, { status: 409 });
 	}
 	await settleBudget(reservation.id, null);
+	const closed = await prisma.budgetReservation.findUniqueOrThrow({ where: { id: reservation.id } });
 	await prisma.budgetEntry.upsert({ where: { key: `reconcile:${reservation.id}` }, update: {}, create: {
 		userId: id, key: `reconcile:${reservation.id}`, kind: 'reconcile', amountMicros: 0,
-		note: `Администратор закрыл зависший резерв без возврата: ${reservation.id}`,
+		note: `Администратор закрыл зависший резерв ${closed.status === 'refunded' ? 'с возвратом' : 'без возврата'}: ${reservation.id}`,
 	} });
 	return NextResponse.json({ ok: true });
 }
