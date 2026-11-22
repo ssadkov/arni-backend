@@ -115,7 +115,11 @@ export async function reserveBudget(userId: string, model: string, source: strin
 	});
 }
 
-/** Missing usage stays charged at the reservation; only confirmed upstream rejection is refunded. */
+/**
+ * A confirmed upstream rejection is refunded. So is a Bedrock chat step that ended without usage (5xx, broken
+ * stream, killed function): AWS has no lookup to learn its cost, and the reserve is many times a real step.
+ * Its request still counts toward the windows. OpenRouter and images without usage stay charged at the reservation.
+ */
 export async function settleBudget(id: string, usage: ReportedUsage | null, rejected = false, servedModel?: string,
 	metadata?: OpenRouterResponseMetadata & { providerLookup?: boolean }) {
 	return prisma.$transaction(async tx => {
@@ -132,11 +136,12 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		const catalog = usage ? usageCostMicros(usage, reservation.inputPerMillion, reservation.outputPerMillion,
 			reservation.cacheReadPerMillion ?? reservation.inputPerMillion, reservation.cacheWritePerMillion ?? reservation.inputPerMillion) : null;
 		// Provider cost stays unmarked. The reserve already includes the markup frozen on this row.
-		const providerActual = rejected ? 0
+		const interrupted = !rejected && !usage && reservation.source === 'bedrock' && reservation.operation !== 'image';
+		const providerActual = rejected || interrupted ? 0
 			: reservation.operation === 'image' ? (reservation.unitPriceMicros ?? reservation.reservedMicros)
 			: usage?.cost !== undefined && reservation.source === 'openrouter' ? costMicros(1, 0, usage.cost * 1_000_000, 0)
 			: catalog ?? (percent <= 0 ? reservation.reservedMicros : Math.round(reservation.reservedMicros * 100 / (100 + percent)));
-		const actual = !rejected && reservation.operation !== 'image' && !usage ? reservation.reservedMicros : applyMarkup(providerActual, percent);
+		const actual = !rejected && !interrupted && reservation.operation !== 'image' && !usage ? reservation.reservedMicros : applyMarkup(providerActual, percent);
 		const walletActual = Math.min(actual, reservation.walletMicros);
 		const balanceReserved = reservation.reservedMicros - reservation.walletMicros;
 		// A bonus-only request never authorized a debit from the main balance.
@@ -144,10 +149,13 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		const charged = walletActual + balanceActual;
 		const refund = balanceReserved - balanceActual;
 		const walletRefund = reservation.walletMicros - walletActual;
-		const status = rejected ? 'refunded' : usage && (reservation.source !== 'openrouter' || usage.cost !== undefined) ? 'reported' : 'estimated';
+		// What AWS billed for an interrupted step is unknown, which is not the same as free.
+		const providerRecorded = interrupted ? null : providerActual;
+		if (interrupted) { console.warn('Bedrock step without usage refunded', JSON.stringify({ requestId: reservation.requestId, model: reservation.model, reservedMicros: reservation.reservedMicros })); }
+		const status = rejected || interrupted ? 'refunded' : usage && (reservation.source !== 'openrouter' || usage.cost !== undefined) ? 'reported' : 'estimated';
 		const cacheUsage = { cacheReadTokens: usage?.prompt_tokens_details?.cached_tokens || 0,
 			cacheWriteTokens: usage?.prompt_tokens_details?.cache_creation_input_tokens || 0 };
-		await tx.budgetReservation.update({ where: { id }, data: { model: billedModel, status, costMicros: charged, providerCostMicros: providerActual, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens, ...cacheUsage } });
+		await tx.budgetReservation.update({ where: { id }, data: { model: billedModel, status, costMicros: charged, providerCostMicros: providerRecorded, promptTokens: usage?.prompt_tokens, completionTokens: usage?.completion_tokens, ...cacheUsage } });
 		if (wallet && walletRefund > 0 && new Date() < wallet.expiresAt) {
 			await tx.budgetWallet.update({ where: { id: wallet.id }, data: {
 				balanceMicros: { increment: walletRefund },
@@ -171,9 +179,9 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		}
 		if (!rejected) {
 			await tx.usageLog.create({ data: { userId: budget.userId, model: billedModel, source: reservation.source, client: reservation.client,
-				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: charged, providerCostMicros: providerActual,
+				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: charged, providerCostMicros: providerRecorded,
 				markupPercent: percent, walletMicros: walletActual, accounting: status,
-				costBasis: metadata?.providerLookup ? 'provider_lookup' : !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
+				costBasis: metadata?.providerLookup ? 'provider_lookup' : interrupted ? 'interrupted' : !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
 				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation,
 				region: usage?.host ?? metadata?.host ?? reservation.region,
 				generationId: metadata?.generationId, finishReason: metadata?.finishReason, streamError: metadata?.streamError,

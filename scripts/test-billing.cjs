@@ -116,15 +116,30 @@ async function main() {
 		assert.deepEqual(logs.map(log => [log.model, log.costMicros, log.cacheReadTokens, log.cacheWriteTokens, log.client]),
 			[['claude', 10650, 8000, 1000, null], ['qwen', 620, 0, 0, 'arni']]);
 	});
-	await check('missing usage keeps estimated reservation; rejected request refunds budget and step', async () => {
+	await check('missing usage: Bedrock chat refunds money but counts the request; OpenRouter and images keep the reserve', async () => {
 		const before = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
-		const estimate = await reserveBudget(userId, 'test', 'bedrock', 10000, 3, 15);
-		await settleBudget(estimate.id, null);
+		const interrupted = await reserveBudget(userId, 'test', 'bedrock', 10500, 3, 15, { requestId: crypto.randomUUID(), markupPercent: 5 });
+		await settleBudget(interrupted.id, null);
+		await settleBudget(interrupted.id, null);
+		const router = await reserveBudget(userId, 'paid/model', 'openrouter', 10000, 3, 15);
+		await settleBudget(router.id, null);
+		const picture = await reserveBudget(userId, 'picture', 'bedrock', 700, 0, 0, { operation: 'image', unitPriceMicros: 700 });
+		await settleBudget(picture.id, null);
 		const rejected = await reserveBudget(userId, 'test', 'bedrock', 10000, 3, 15);
 		await settleBudget(rejected.id, null, true);
 		const after = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
-		assert.deepEqual({ delta: before.balanceMicros - after.balanceMicros, steps: after.fiveHourRequests - before.fiveHourRequests,
-			status: (await prisma.budgetReservation.findUniqueOrThrow({ where: { id: estimate.id } })).status }, { delta: 10000, steps: 1, status: 'estimated' });
+		const row = id => prisma.budgetReservation.findUniqueOrThrow({ where: { id } });
+		const log = await prisma.usageLog.findUniqueOrThrow({ where: { requestId: interrupted.requestId } });
+		assert.deepEqual({
+			delta: before.balanceMicros - after.balanceMicros,
+			windows: [after.fiveHourUsedMicros - before.fiveHourUsedMicros, after.weeklyUsedMicros - before.weeklyUsedMicros],
+			steps: after.fiveHourRequests - before.fiveHourRequests,
+			statuses: [(await row(interrupted.id)).status, (await row(router.id)).status, (await row(picture.id)).status],
+			log: [log.costMicros, log.providerCostMicros, log.accounting, log.costBasis],
+		}, {
+			delta: 10700, windows: [10700, 10700], steps: 3, statuses: ['refunded', 'estimated', 'estimated'],
+			log: [0, null, 'refunded', 'interrupted'],
+		});
 	});
 	await check('5-hour, weekly, request and balance caps block before upstream', async () => {
 		const before = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
@@ -230,6 +245,14 @@ async function main() {
 					calls++;
 					if (mode === 'error') { return new Response('Upstream refused', { status: 400 }); }
 					if (mode === 'uncertain') { return new Response('Upstream timeout', { status: 503 }); }
+					if (mode === 'broken' || mode === 'truncated') {
+						let sent = false;
+						return new Response(new ReadableStream({ pull(controller) {
+							if (!sent) { sent = true; controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"part"}}]}\n\n')); }
+							else if (mode === 'broken') { controller.error(new Error('reset')); }
+							else { controller.close(); }
+						} }));
+					}
 					if (mode === 'stream') {
 						const bytes = new TextEncoder().encode('data: {"usage":{"prompt_tokens":100,"completion_tokens":10}}\n\ndata: [DONE]\n\n');
 						return new Response(new ReadableStream({ start(controller) { for (const byte of bytes) { controller.enqueue(Uint8Array.of(byte)); } controller.close(); } }));
@@ -257,10 +280,27 @@ async function main() {
 		mode = 'error';
 		assert.equal((await chat(request(false))).status, 400);
 		assert.equal((await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros, after.balanceMicros);
+		const balance = async () => (await prisma.accountBudget.findUniqueOrThrow({ where: { userId } })).balanceMicros;
+		const settled = async () => {
+			for (let i = 0; i < 50 && await prisma.budgetReservation.count({ where: { userId, status: 'pending', model: 'test-bedrock' } }); i++) {
+				await new Promise(resolve => setTimeout(resolve, 20));
+			}
+		};
+		for (mode of ['broken', 'truncated']) {
+			const start = await balance();
+			await (await chat(request(true))).text().catch(() => undefined);
+			await settled();
+			assert.equal(await balance(), start, `${mode} Bedrock stream costs the user nothing`);
+		}
+		mode = 'stream';
+		const beforeCancel = await balance();
+		await (await chat(request(true))).body.cancel();
+		await settled();
+		assert.equal(beforeCancel - await balance(), 450, 'cancelling on the client is not a way to a free answer');
 		mode = 'uncertain';
+		const beforeFailure = await balance();
 		assert.equal((await chat(request(false))).status, 503);
-		const uncertain = await prisma.budgetReservation.findFirstOrThrow({ where: { userId, status: 'estimated', model: 'test-bedrock' } });
-		assert.equal(uncertain.costMicros, uncertain.reservedMicros);
+		assert.equal(await balance(), beforeFailure, 'a Bedrock 5xx costs the user nothing');
 		await prisma.user.update({ where: { id: userId }, data: { llmProvider: 'OPENROUTER' } });
 		mode = 'json';
 		assert.equal((await chat(request(false, 'test:free'))).status, 200);
@@ -270,7 +310,7 @@ async function main() {
 		assert.equal((await chat(request(false))).status, 403);
 		assert.equal(calls, priorCalls);
 	});
-	await check('stale pending reservations can be closed conservatively; fresh ones cannot', async () => {
+	await check('stale Bedrock reservations close with a refund; fresh ones cannot be closed', async () => {
 		await prisma.accountBudget.update({ where: { userId }, data: { enabled: true } });
 		const row = await reserveBudget(userId, 'test', 'bedrock', 10000, 3, 15);
 		const request = () => new NextRequest('http://localhost/api/admin/reconcile', { method: 'POST', headers: {
@@ -281,7 +321,8 @@ async function main() {
 		assert.equal((await reconcile(request(), { params: Promise.resolve({ id: userId }) })).status, 200);
 		assert.equal((await reconcile(request(), { params: Promise.resolve({ id: userId }) })).status, 200);
 		assert.equal(await prisma.budgetEntry.count({ where: { key: `reconcile:${row.id}` } }), 1);
-		assert.equal((await prisma.budgetReservation.findUniqueOrThrow({ where: { id: row.id } })).costMicros, 10000);
+		const closed = await prisma.budgetReservation.findUniqueOrThrow({ where: { id: row.id } });
+		assert.deepEqual([closed.status, closed.costMicros], ['refunded', 0]);
 	});
 	await check('existing FREE account keeps daily quota, zero balance access, streaming usage and rejected-step refund', async () => {
 		// Remove only this disposable account's test budget to exercise the existing-user path.

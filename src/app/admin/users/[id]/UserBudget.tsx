@@ -75,5 +75,5 @@ export function ReconcileReservation({ userId, reservationId }: { userId: string
 		} catch { setMessage('Не удалось подтвердить закрытие. Можно повторить.'); }
 		finally { setBusy(false); }
 	}
-	return <div><button type="button" onClick={reconcile} disabled={busy} className="text-indigo-600 disabled:opacity-50">Закрыть по оценке</button><p role="status">{message}</p></div>;
+	return <div><button type="button" onClick={reconcile} disabled={busy} className="text-indigo-600 disabled:opacity-50">Закрыть резерв</button><p role="status">{message}</p></div>;
 }
