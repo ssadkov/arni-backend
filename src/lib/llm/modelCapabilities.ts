@@ -14,6 +14,8 @@ export type ModelCapabilities = {
 	 * for user messages") but accepts the same image as a sibling block of that user message.
 	 */
 	toolResultImages?: false;
+	/** Reserve by Bedrock's free CountTokens, not by bytes: at this price the byte bound alone exceeds a five-hour window. */
+	countsInputTokens?: true;
 };
 
 const qwen: Record<string, ModelCapabilities> = {
@@ -58,6 +60,12 @@ export function modelCapabilities(model: string): ModelCapabilities {
 	if (nova) {
 		return { contextWindow: nova === 'micro' ? 128000 : 300000, maxOutputTokens: MANAGED_MAX_OUTPUT_TOKENS, vision: nova !== 'micro',
 			cache: { minimumTokens: 1000, readMultiplier: 0.25, writeMultiplier: 0, textOnly: true } };
+	}
+	if (/anthropic\.claude-opus-4-6/.test(model)) {
+		// Both limits are deliberately below the native 1M / 128K. They keep one step's reservation under $2, and at
+		// about 50 tokens a second a longer answer would outlive the route's 300 seconds.
+		return { contextWindow: 200000, maxOutputTokens: 12000, vision: true, countsInputTokens: true,
+			cache: { minimumTokens: 4096, readMultiplier: 0.1, writeMultiplier: 1.25 } };
 	}
 	if (/anthropic\.claude-sonnet-4-6/.test(model)) {
 		return { contextWindow: 1_000_000, maxOutputTokens: 64000, vision: true,

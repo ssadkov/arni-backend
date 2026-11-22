@@ -79,19 +79,31 @@ async function main() {
   assertValidText({messages:cached}); assert.equal(JSON.stringify(messages),before);
   assert.equal(cacheConversePrefix('qwen.qwen3-coder-next',messages),messages);
  });
-	await check('picker offers at most seven curated free and Bedrock models; selection and fallbacks survive', () => {
+	await check('picker offers at most eight curated free and Bedrock models; selection and fallbacks survive', () => {
 		const { pickFreeModels, pickBedrockModels, PICKER_FREE_MODELS, PICKER_BEDROCK_MODELS } = require('../src/lib/modelPicker.ts');
 		const free = ids => ids.map(id => ({ id }));
 		const live = free(['tiny/lfm:free', ...[...PICKER_FREE_MODELS].reverse(), 'other/a:free', 'other/b:free']);
 		assert.deepEqual(pickFreeModels(live).map(model => model.id), PICKER_FREE_MODELS, 'curated order, no extras');
 		assert.deepEqual(pickFreeModels(free(['x:free', PICKER_FREE_MODELS[1], 'y:free', 'z:free'])).map(model => model.id), [PICKER_FREE_MODELS[1], 'x:free', 'y:free'], 'topped up to three');
-		const allowed = free(['us.anthropic.claude-sonnet-4-6', 'global.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-haiku-4-5-20251001-v1:0', 'zai.glm-5', 'us.meta.llama3-8b', 'qwen.qwen3-32b-v1:0', ...PICKER_BEDROCK_MODELS.slice(3)]);
-		assert.deepEqual(pickBedrockModels(allowed, null).map(model => model.id), ['global.anthropic.claude-sonnet-4-6', 'us.anthropic.claude-haiku-4-5-20251001-v1:0', 'zai.glm-5', ...PICKER_BEDROCK_MODELS.slice(3)]);
+		const allowed = free(['us.anthropic.claude-sonnet-4-6', 'global.anthropic.claude-sonnet-4-6', 'global.anthropic.claude-opus-4-6-v1', 'us.anthropic.claude-haiku-4-5-20251001-v1:0', 'zai.glm-5', 'us.meta.llama3-8b', 'qwen.qwen3-32b-v1:0', ...PICKER_BEDROCK_MODELS.slice(4)]);
+		assert.deepEqual(pickBedrockModels(allowed, null).map(model => model.id), ['global.anthropic.claude-sonnet-4-6', 'global.anthropic.claude-opus-4-6-v1', 'us.anthropic.claude-haiku-4-5-20251001-v1:0', 'zai.glm-5', ...PICKER_BEDROCK_MODELS.slice(4)]);
 		assert.equal(pickBedrockModels(allowed, 'us.anthropic.claude-sonnet-4-6')[0].id, 'us.anthropic.claude-sonnet-4-6', 'selected profile wins');
 		assert.deepEqual(pickBedrockModels(allowed, 'qwen.qwen3-32b-v1:0').map(model => model.id).slice(-1), ['qwen.qwen3-32b-v1:0'], 'selected model stays listed');
 		assert.deepEqual(pickBedrockModels(free(['us.meta.llama3-8b']), null), [], 'uncurated models are hidden');
 		const { isRecommendedModel } = require('../src/lib/modelPicker.ts');
 		assert.deepEqual(['global.anthropic.claude-sonnet-4-6', 'zai.glm-5', PICKER_FREE_MODELS[0], 'qwen.qwen3-32b-v1:0', 'x:free'].map(isRecommendedModel), [true, true, true, false, false]);
+	});
+	await check('Opus 4.6 is capped so one step fits the usual window, and caches its history', () => {
+		const id = 'global.anthropic.claude-opus-4-6-v1';
+		const capability = modelCapabilities(id);
+		const metadata = managedModelMetadata(id);
+		const history = toConverse({ messages: [{ role: 'user', content: 'Reference '.repeat(2500) }, { role: 'assistant', tool_calls: [call] }, { role: 'tool', tool_call_id: call.id, content: 'saved' }] }, id).messages;
+		const worstStep = (capability.contextWindow * 5 * capability.cache.writeMultiplier + metadata.top_provider.max_completion_tokens * 25) / 1e6;
+		assert.deepEqual({
+			window: metadata.context_length, output: metadata.top_provider.max_completion_tokens, vision: capability.vision, counted: capability.countsInputTokens,
+			cached: cacheConversePrefix(id, history)[1].content.at(-1).cachePoint.type, usd: bedrockUsage(id, { inputTokens: 1000, cacheReadInputTokens: 50000, cacheWriteInputTokens: 2000, outputTokens: 1000 }, { inputPerMillion: 5, outputPerMillion: 25 }).cost,
+			fitsWindowWith20PercentMarkup: worstStep * 1.2 < 2,
+		}, { window: 200000, output: 12000, vision: true, counted: true, cached: 'default', usd: 0.0675, fitsWindowWith20PercentMarkup: true });
 	});
 	await check('model metadata carries real context, response reserve, vision and regional Qwen routing', () => {
 		assert.equal(QWEN3_MODEL_IDS.length, 7);

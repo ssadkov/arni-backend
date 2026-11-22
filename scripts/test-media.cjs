@@ -36,7 +36,7 @@ let invocations = 0, countCalls = 0, mode = 'success', captured;
 runtime.BedrockRuntimeClient.prototype.send = async function (command) {
 	captured = command.input;
 	if (command instanceof runtime.ConverseCommand) { return { output: { message: { role: 'assistant', content: [{ text: 'Selected model response' }] } }, usage: { inputTokens: 10, outputTokens: 5 }, stopReason: 'end_turn' }; }
-	if (command instanceof runtime.CountTokensCommand) { countCalls++; if (mode === 'count-failed') { throw new Error('Unsupported'); } return { inputTokens: 2000 }; }
+	if (command instanceof runtime.CountTokensCommand) { countCalls++; if (mode === 'count-failed') { throw new Error('Unsupported'); } return { inputTokens: mode === 'count-over' ? 200001 : 2000 }; }
 	invocations++;
 	if (mode === 'rejected') { throw Object.assign(new Error('Denied'), { $metadata: { httpStatusCode: 403 } }); }
 	if (mode === 'busy') { throw Object.assign(new Error('Too many requests'), { $metadata: { httpStatusCode: 429 } }); }
@@ -140,6 +140,19 @@ async function main() {
 		routerMode = 'success';
 		const publicList = await require('../src/app/api/models/route.ts').GET(new NextRequest('http://localhost/api/models'));
 		assert.ok((await publicList.json()).data.every(row => row.id.endsWith(':free')));
+	});
+	await check('Opus 4.6 reserves by counted tokens, falls back to bytes, and refuses history over its window', async () => {
+		const opus = 'global.anthropic.claude-opus-4-6-v1';
+		await prisma.bedrockModel.upsert({ where: { id: opus }, update: { inputPerMillion: 5, outputPerMillion: 25 }, create: { id: opus, name: 'Opus 4.6', inputPerMillion: 5, outputPerMillion: 25 } });
+		const body = managedBody({ model: opus, messages: [{ role: 'user', content: 'Длинная история проекта. '.repeat(3000) }], max_tokens: 16000 }, true);
+		const counted = await budgetPrice(body, 'bedrock', opus);
+		// The mocked count is 2000 tokens at the cache-write rate, plus the 12000-token answer cap.
+		assert.deepEqual([body.max_tokens, counted.reservedMicros, captured.modelId], [12000, 312500, 'anthropic.claude-opus-4-6-v1']);
+		mode = 'count-failed';
+		assert.ok((await budgetPrice(body, 'bedrock', opus)).reservedMicros > 1_000_000, 'text still works without the count');
+		mode = 'count-over';
+		await assert.rejects(budgetPrice(body, 'bedrock', opus), error => error.code === 'context_too_large');
+		mode = 'success';
 	});
 	await check('invalid screenshots are rejected and long histories keep only recent screenshots', async () => {
 		for (const part of [{ type: 'image_url', image_url: { url: 'http://169.254.169.254/' } }, { type: 'image_url', image_url: { url: 'data:image/png;base64,YQ==' } }]) {
