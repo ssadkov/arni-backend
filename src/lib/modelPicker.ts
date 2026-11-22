@@ -4,7 +4,7 @@
  */
 
 /** Upper bound per category (free / paid) in the picker. */
-export const PICKER_LIMIT_PER_CATEGORY = 7;
+export const PICKER_LIMIT_PER_CATEGORY = 8;
 
 /** When fewer curated free models are live, other free models fill the list up to this count. */
 const MIN_FREE_MODELS = 3;
@@ -28,6 +28,7 @@ export const PICKER_FREE_MODELS: readonly string[] = [
  */
 export const PICKER_BEDROCK_MODELS: readonly string[] = [
 	'anthropic.claude-sonnet-4-6',
+	'anthropic.claude-opus-4-6-v1',
 	'anthropic.claude-haiku-4-5-20251001-v1:0',
 	'zai.glm-5',
 	'minimax.minimax-m2.5',

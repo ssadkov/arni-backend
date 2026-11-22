@@ -91,8 +91,14 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 		if (source === 'bedrock' && !supportsScreenshots(model)) { throw new BudgetError('vision_unavailable', 'Выберите модель с поддержкой изображений.', 400); }
 		if (source === 'openrouter') { await routerModel(model, true); }
 	}
-	const promptUpperBound = images && model.includes('anthropic.') ? await countBedrockInput(body, model)
-		: conservativeInputTokenBound(body.messages, body.tools);
+	const counted = images && model.includes('anthropic.') ? await countBedrockInput(body, model)
+		// Screenshots need the count; for text a failed count only means the larger byte-based reservation.
+		: source === 'bedrock' && modelCapabilities(model).countsInputTokens ? await countBedrockInput(body, model).catch(() => undefined)
+		: undefined;
+	const promptUpperBound = counted ?? conservativeInputTokenBound(body.messages, body.tools);
+	if (counted !== undefined && modelCapabilities(model).countsInputTokens && counted > contextWindow) {
+		throw new BudgetError('context_too_large', 'Запрос превышает предел размера для выбранной модели. Сожмите историю или выберите модель с большим контекстом.', 400);
+	}
 	if (promptUpperBound > contextByteLimit(contextWindow)) {
 		throw new BudgetError('context_too_large', 'Запрос превышает предел размера для выбранной модели. Сожмите историю или выберите модель с большим контекстом.', 400);
 	}
