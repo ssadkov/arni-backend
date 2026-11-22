@@ -4,7 +4,7 @@
  */
 
 /** Upper bound per category (free / paid) in the picker. */
-export const PICKER_LIMIT_PER_CATEGORY = 7;
+export const PICKER_LIMIT_PER_CATEGORY = 8;
 
 /** When fewer curated free models are live, other free models fill the list up to this count. */
 const MIN_FREE_MODELS = 3;
@@ -34,7 +34,14 @@ export const PICKER_BEDROCK_MODELS: readonly string[] = [
 	'qwen.qwen3-next-80b-a3b',
 	'deepseek.v3.2',
 	'moonshotai.kimi-k2.5',
+	'amazon.nova-lite-v1:0',
 ];
+
+/**
+ * Used only when the user picks them, never as a fallback and never recommended. The fallback is the cheapest
+ * allowed model, so enabling Nova Lite would have made it the default for every account without a choice.
+ */
+const OPT_IN_BEDROCK_MODELS: readonly string[] = ['amazon.nova-lite-v1:0'];
 
 /** Strips the cross-region inference profile prefix: `global.anthropic.x` → `anthropic.x`. */
 function foundationModelId(id: string): string {
@@ -43,7 +50,13 @@ function foundationModelId(id: string): string {
 
 /** Whether the picker should lead with this model: it is on one of the curated lists. */
 export function isRecommendedModel(id: string): boolean {
-	return PICKER_FREE_MODELS.includes(id) || PICKER_BEDROCK_MODELS.includes(foundationModelId(id));
+	const base = foundationModelId(id);
+	return PICKER_FREE_MODELS.includes(id) || PICKER_BEDROCK_MODELS.includes(base) && !OPT_IN_BEDROCK_MODELS.includes(base);
+}
+
+/** The model for an account that chose none: the first allowed (cheapest) one that is not opt-in. */
+export function fallbackBedrockModel<T extends { id: string }>(allowed: readonly T[]): T | undefined {
+	return allowed.find(model => !OPT_IN_BEDROCK_MODELS.includes(foundationModelId(model.id))) ?? allowed[0];
 }
 
 /** Curated free models in their order, topped up from the rest when too few are live. */

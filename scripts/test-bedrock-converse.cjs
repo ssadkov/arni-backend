@@ -79,7 +79,7 @@ async function main() {
   assertValidText({messages:cached}); assert.equal(JSON.stringify(messages),before);
   assert.equal(cacheConversePrefix('qwen.qwen3-coder-next',messages),messages);
  });
-	await check('picker offers at most seven curated free and Bedrock models; selection and fallbacks survive', () => {
+	await check('picker offers at most eight curated free and Bedrock models; selection and fallbacks survive', () => {
 		const { pickFreeModels, pickBedrockModels, PICKER_FREE_MODELS, PICKER_BEDROCK_MODELS } = require('../src/lib/modelPicker.ts');
 		const free = ids => ids.map(id => ({ id }));
 		const live = free(['tiny/lfm:free', ...[...PICKER_FREE_MODELS].reverse(), 'other/a:free', 'other/b:free']);
@@ -92,6 +92,32 @@ async function main() {
 		assert.deepEqual(pickBedrockModels(free(['us.meta.llama3-8b']), null), [], 'uncurated models are hidden');
 		const { isRecommendedModel } = require('../src/lib/modelPicker.ts');
 		assert.deepEqual(['global.anthropic.claude-sonnet-4-6', 'zai.glm-5', PICKER_FREE_MODELS[0], 'qwen.qwen3-32b-v1:0', 'x:free'].map(isRecommendedModel), [true, true, true, false, false]);
+	});
+	await check('Nova Lite is opt-in: never the fallback or recommended, 10K output even when the client asks 4096', () => {
+		const { fallbackBedrockModel, isRecommendedModel } = require('../src/lib/modelPicker.ts');
+		const lite = { id: 'us.amazon.nova-lite-v1:0' };
+		const qwen = { id: 'qwen.qwen3-next-80b-a3b' };
+		const { managedBody } = require('../src/lib/budgetPricing.ts');
+		assert.deepEqual({
+			fallback: fallbackBedrockModel([lite, qwen]).id,
+			onlyNova: fallbackBedrockModel([lite]).id,
+			recommended: isRecommendedModel(lite.id),
+			advertised: managedModelMetadata(lite.id).top_provider.max_completion_tokens,
+			limits: [lite.id, qwen.id].map(id => managedBody({ model: id, messages: [{ role: 'user', content: 'x' }], max_tokens: 4096 }).max_tokens),
+		}, { fallback: qwen.id, onlyNova: lite.id, recommended: false, advertised: 10000, limits: [10000, 4096] });
+	});
+	await check('inline thinking is removed across any chunk boundary', () => {
+		const { InlineThinkingFilter } = require('../src/lib/llm/inlineThinking.ts');
+		const cases = [['<thinking>plan</thinking>\n\n<answer>Готово: a < b</answer>', false, 'Готово: a < b'],
+			['<thinking>call the tool</thinking>\n', true, ''], ['<thinking>Only thought', false, 'Only thought'], ['Plain <b>text</b> <', false, 'Plain <b>text</b> <']];
+		for (const [source, tool, expected] of cases) {
+			for (let size = 1; size <= source.length; size++) {
+				const filter = new InlineThinkingFilter();
+				let shown = '';
+				for (let at = 0; at < source.length; at += size) { shown += filter.push(source.slice(at, at + size)); }
+				assert.equal(shown + filter.end(tool), expected);
+			}
+		}
 	});
 	await check('model metadata carries real context, response reserve, vision and regional Qwen routing', () => {
 		assert.equal(QWEN3_MODEL_IDS.length, 7);
@@ -255,6 +281,18 @@ async function main() {
 			}
 			const notice = lengthNotice(true);
 			assert.deepEqual(results, [{ finish: 'length', content: notice }, { finish: 'length', content: notice }]);
+		});
+		await check('Nova Lite gets greedy tool decoding only with tools; other models keep their temperature', async () => {
+			const sentInputs = [];
+			runtime.BedrockRuntimeClient.prototype.send = async command => {
+				sentInputs.push({ temperature: command.input.inferenceConfig.temperature, extra: command.input.additionalModelRequestFields });
+				return { output: { message: { role: 'assistant', content: [{ text: 'ok' }] } }, stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } };
+			};
+			const tools = [{ type: 'function', function: { name: 'create', parameters: { type: 'object', properties: {} } } }];
+			for (const [id, withTools] of [['us.amazon.nova-lite-v1:0', true], ['us.amazon.nova-lite-v1:0', false], [model, true]]) {
+				await (await completeWithBedrock({ messages: [{ role: 'user', content: 'x' }], temperature: 0.4, ...(withTools ? { tools } : {}) }, id)).text();
+			}
+			assert.deepEqual(sentInputs, [{ temperature: 0, extra: { inferenceConfig: { topK: 1 } } }, { temperature: 0.4, extra: undefined }, { temperature: 0.4, extra: undefined }]);
 		});
 		await check('Bedrock validation errors retain HTTP 400 and are not retried inside the backend', async () => {
 			runtime.BedrockRuntimeClient.prototype.send = async () => { sent++; throw Object.assign(new Error('Invalid request'), { $metadata: { httpStatusCode: 400 } }); };
