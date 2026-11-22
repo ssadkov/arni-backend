@@ -13,6 +13,7 @@ import {
 import { decodeScreenshot, screenshotCount, supportsScreenshots } from './vision';
 import { BudgetError } from '@/lib/budget';
 import { BEDROCK_MAX_OUTPUT_TOKENS, modelCapabilities } from './modelCapabilities';
+import { InlineThinkingFilter } from './inlineThinking';
 import { usageCostMicros, type ReportedUsage } from '../budgetPolicy';
 
 type CatalogPrice = { inputPerMillion: number | null; outputPerMillion: number | null };
@@ -444,9 +445,10 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 			throw new BudgetError('vision_unavailable', 'Выберите модель с поддержкой изображений, например Claude, Kimi K2.5 или Qwen3 VL.', 400);
 		}
 		const { system, messages, toolConfig } = toConverse(body, modelId);
+		const greedy = Boolean(toolConfig && modelCapabilities(modelId).greedyTools);
 		const inferenceConfig = {
 			maxTokens: maxTokens(body),
-			...(typeof body.temperature === 'number' ? { temperature: body.temperature } : {}),
+			...(greedy ? { temperature: 0 } : typeof body.temperature === 'number' ? { temperature: body.temperature } : {}),
 		};
 		const input = {
 			modelId,
@@ -454,6 +456,7 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 			...(system.length > 0 ? { system: price ? cacheConverseSystem(modelId, system) : system } : {}),
 			...(toolConfig ? { toolConfig } : {}),
 			inferenceConfig,
+			...(greedy ? { additionalModelRequestFields: { inferenceConfig: { topK: 1 } } } : {}),
 		};
 
 		if (body.stream) {
@@ -466,7 +469,7 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 		}
 
 		const response = await client(modelCapabilities(modelId).region || region()).send(new ConverseCommand(input));
-		const text = (response.output?.message?.content ?? [])
+		let text = (response.output?.message?.content ?? [])
 			.map((block) => ('text' in block ? block.text : ''))
 			.filter(Boolean)
 			.join('');
@@ -480,6 +483,10 @@ export async function completeWithBedrock(rawBody: unknown, forcedModelId?: stri
 					arguments: JSON.stringify(tool.input ?? {}),
 				},
 			}));
+		if (modelCapabilities(modelId).inlineThinking) {
+			const filter = new InlineThinkingFilter();
+			text = filter.push(text) + filter.end(toolCalls.length > 0);
+		}
 		const finish = finishReason(response.stopReason, response.usage?.outputTokens, inferenceConfig.maxTokens);
 		const headers = providerHeaders(modelId);
 		headers.set('Content-Type', 'application/json');
@@ -525,6 +532,7 @@ function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: strin
 			let stop: string | undefined;
 			let outputTokens: number | undefined;
 			let toolCallStarted = false;
+			const thinking = modelCapabilities(modelId).inlineThinking ? new InlineThinkingFilter() : undefined;
 			try {
 				for await (const event of events ?? []) {
 					const record = event as Record<string, any>;
@@ -542,7 +550,8 @@ function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: strin
 					}
 					const delta = record.contentBlockDelta?.delta;
 					if (typeof delta?.text === 'string' && delta.text) {
-						controller.enqueue(sse(chunk(modelId, { content: delta.text })));
+						const shown = thinking ? thinking.push(delta.text) : delta.text;
+						if (shown) { controller.enqueue(sse(chunk(modelId, { content: shown }))); }
 					}
 					if (typeof delta?.toolUse?.input === 'string' && delta.toolUse.input) {
 						controller.enqueue(sse(chunk(modelId, {
@@ -561,6 +570,8 @@ function openAIStream(events: AsyncIterable<unknown> | undefined, modelId: strin
 						controller.enqueue(sse(usagePayload(modelId, usage, price)));
 					}
 				}
+				const tail = thinking?.end(toolCallStarted);
+				if (tail) { controller.enqueue(sse(chunk(modelId, { content: tail }))); }
 				const finish = finishReason(stop, outputTokens, limit);
 				if (finish === 'length') {
 					controller.enqueue(sse(chunk(modelId, { content: lengthNotice(toolCallStarted) })));

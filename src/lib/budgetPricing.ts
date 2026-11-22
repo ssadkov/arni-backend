@@ -35,7 +35,7 @@ export function managedBody(body: BudgetBody, allowImages = false): BudgetBody {
 	// DeepSeek thinks before it acts; 16K ran out before the tool call (2026-11-20).
 	const outputLimit = isDeepSeekPick(model) ? TRIAL_MAX_OUTPUT_TOKENS : model.endsWith(':free') ? FREE_MAX_OUTPUT_TOKENS : managedOutputLimit(model);
 	// DeepSeek ignores the client's limit: Arni Lite always asks for 4096, and reasoning alone can use that up.
-	const requested = isDeepSeekPick(model) ? outputLimit : body.max_completion_tokens ?? body.max_tokens ?? outputLimit;
+	const requested = isDeepSeekPick(model) || modelCapabilities(model).ignoresClientOutputLimit ? outputLimit : body.max_completion_tokens ?? body.max_tokens ?? outputLimit;
 	if (allowImages) { screenshotCount(body.messages); }
 	if (!Number.isFinite(requested) || requested < 1) { throw new BudgetError('invalid_output_limit', 'Некорректный лимит ответа.', 400); }
 	const messages = body.messages.map(message => ({ role: message.role, content: Array.isArray(message.content) ? message.content.map(part => part.type === 'image_url' ? { type: 'image_url', image_url: { url: part.image_url.url } } : { type: 'text', text: part.text }) : message.content,

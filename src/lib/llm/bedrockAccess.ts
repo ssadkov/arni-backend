@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import prisma from '@/lib/prisma';
+import { fallbackBedrockModel } from '@/lib/modelPicker';
 
 export type CatalogRow = {
 	id: string;
@@ -66,5 +67,5 @@ export async function modelIdForUser(userId: string, preferred: string | null, r
 	if (requested && !requested.includes('/') && !requested.endsWith(':free')) {
 		return allowed.find((model) => model.id === requested)?.id || null;
 	}
-	return allowed.find((model) => model.id === preferred)?.id || allowed[0].id;
+	return allowed.find((model) => model.id === preferred)?.id || fallbackBedrockModel(allowed)!.id;
 }

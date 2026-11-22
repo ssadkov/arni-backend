@@ -14,6 +14,12 @@ export type ModelCapabilities = {
 	 * for user messages") but accepts the same image as a sibling block of that user message.
 	 */
 	toolResultImages?: false;
+	/** Tool calls need greedy decoding (temperature 0, topK 1); otherwise Bedrock rejects them as an invalid ToolUse sequence. */
+	greedyTools?: true;
+	/** The model prints `<thinking>` blocks inside its visible text. */
+	inlineThinking?: true;
+	/** Use our output limit, not the client's: Arni Lite always asks for 4096. */
+	ignoresClientOutputLimit?: true;
 };
 
 const qwen: Record<string, ModelCapabilities> = {
@@ -54,6 +60,11 @@ export function modelCapabilities(model: string): ModelCapabilities {
 	if (qwen[model]) { return qwen[model]; }
 	if (openWeight[model]) { return openWeight[model]; }
 	// AWS tariff: cache read is 25% of input, cache write is free. Premier is end of life and stays out.
+	if (/amazon\.nova-lite-/.test(model)) {
+		// Live agent bench 2026-11-22: 10K output accepted; a 300-line file needs ~5.4K and fails without greedy decoding.
+		return { contextWindow: 300000, maxOutputTokens: 10000, vision: true, greedyTools: true, inlineThinking: true, ignoresClientOutputLimit: true,
+			cache: { minimumTokens: 1000, readMultiplier: 0.25, writeMultiplier: 0, textOnly: true } };
+	}
 	const nova = /amazon\.nova-(micro|lite|pro|2-lite)-/.exec(model)?.[1];
 	if (nova) {
 		return { contextWindow: nova === 'micro' ? 128000 : 300000, maxOutputTokens: MANAGED_MAX_OUTPUT_TOKENS, vision: nova !== 'micro',
