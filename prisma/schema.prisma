@@ -98,7 +98,7 @@ model UsageLog {
   providerCostMicros Int?
   markupPercent    Int      @default(0)
   accounting       String? // reported, estimated, or legacy
-  costBasis        String? // provider, provider_lookup, catalog, reservation
+  costBasis        String? // provider, provider_lookup, catalog, prompt_estimate, reservation, interrupted
   generationId     String?
   finishReason     String?
   streamError      String?

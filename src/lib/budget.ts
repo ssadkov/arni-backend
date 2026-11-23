@@ -118,10 +118,12 @@ export async function reserveBudget(userId: string, model: string, source: strin
 /**
  * A confirmed upstream rejection is refunded. So is a Bedrock chat step that ended without usage (5xx, broken
  * stream, killed function): AWS has no lookup to learn its cost, and the reserve is many times a real step.
- * Its request still counts toward the windows. OpenRouter and images without usage stay charged at the reservation.
+ * Its request still counts toward the windows. Other chat steps without usage are charged at
+ * `metadata.promptEstimateMicros` (provider cost of the prompt before markup) when the caller has one,
+ * otherwise at the reservation, like images without usage.
  */
 export async function settleBudget(id: string, usage: ReportedUsage | null, rejected = false, servedModel?: string,
-	metadata?: OpenRouterResponseMetadata & { providerLookup?: boolean }) {
+	metadata?: OpenRouterResponseMetadata & { providerLookup?: boolean; promptEstimateMicros?: number }) {
 	return prisma.$transaction(async tx => {
 		const initial = await tx.budgetReservation.findUniqueOrThrow({ where: { id } });
 		const budget = await lockBudget(tx, initial.userId);
@@ -137,11 +139,17 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 			reservation.cacheReadPerMillion ?? reservation.inputPerMillion, reservation.cacheWritePerMillion ?? reservation.inputPerMillion) : null;
 		// Provider cost stays unmarked. The reserve already includes the markup frozen on this row.
 		const interrupted = !rejected && !usage && reservation.source === 'bedrock' && reservation.operation !== 'image';
+		// An answer that ended without usage is charged for its prompt, never above the reservation.
+		const promptEstimate = metadata?.promptEstimateMicros;
+		const estimate = !usage && !rejected && !interrupted && reservation.operation !== 'image' && promptEstimate !== undefined
+			? Math.min(promptEstimate, percent <= 0 ? reservation.reservedMicros : Math.floor(reservation.reservedMicros * 100 / (100 + percent))) : undefined;
 		const providerActual = rejected || interrupted ? 0
 			: reservation.operation === 'image' ? (reservation.unitPriceMicros ?? reservation.reservedMicros)
 			: usage?.cost !== undefined && reservation.source === 'openrouter' ? costMicros(1, 0, usage.cost * 1_000_000, 0)
-			: catalog ?? (percent <= 0 ? reservation.reservedMicros : Math.round(reservation.reservedMicros * 100 / (100 + percent)));
-		const actual = !rejected && !interrupted && reservation.operation !== 'image' && !usage ? reservation.reservedMicros : applyMarkup(providerActual, percent);
+			: catalog ?? estimate ?? (percent <= 0 ? reservation.reservedMicros : Math.round(reservation.reservedMicros * 100 / (100 + percent)));
+		const actual = !rejected && !interrupted && reservation.operation !== 'image' && !usage
+			? estimate !== undefined ? Math.min(reservation.reservedMicros, applyMarkup(estimate, percent)) : reservation.reservedMicros
+			: applyMarkup(providerActual, percent);
 		const walletActual = Math.min(actual, reservation.walletMicros);
 		const balanceReserved = reservation.reservedMicros - reservation.walletMicros;
 		// A bonus-only request never authorized a debit from the main balance.
@@ -181,7 +189,7 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 			await tx.usageLog.create({ data: { userId: budget.userId, model: billedModel, source: reservation.source, client: reservation.client,
 				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: charged, providerCostMicros: providerRecorded,
 				markupPercent: percent, walletMicros: walletActual, accounting: status,
-				costBasis: metadata?.providerLookup ? 'provider_lookup' : interrupted ? 'interrupted' : !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
+				costBasis: metadata?.providerLookup ? 'provider_lookup' : interrupted ? 'interrupted' : !usage ? estimate !== undefined ? 'prompt_estimate' : 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
 				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation,
 				region: usage?.host ?? metadata?.host ?? reservation.region,
 				generationId: metadata?.generationId, finishReason: metadata?.finishReason, streamError: metadata?.streamError,
