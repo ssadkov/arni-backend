@@ -141,6 +141,17 @@ async function main() {
 			log: [0, null, 'refunded', 'interrupted'],
 		});
 	});
+	await check('an answer without usage is charged its prompt estimate, never above the reservation', async () => {
+		const before = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
+		const prompt = await reserveBudget(userId, 'test', 'openrouter', 10000, 3, 15);
+		await settleBudget(prompt.id, null, false, undefined, { promptEstimateMicros: 700 });
+		const capped = await reserveBudget(userId, 'test', 'openrouter', 10000, 3, 15);
+		await settleBudget(capped.id, null, false, undefined, { promptEstimateMicros: 50000 });
+		const after = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
+		const rows = await prisma.budgetReservation.findMany({ where: { id: { in: [prompt.id, capped.id] } } });
+		assert.deepEqual({ delta: before.balanceMicros - after.balanceMicros, rows: rows.map(row => [row.status, row.costMicros]).sort((a, b) => a[1] - b[1]) },
+			{ delta: 10700, rows: [['estimated', 700], ['estimated', 10000]] });
+	});
 	await check('5-hour, weekly, request and balance caps block before upstream', async () => {
 		const before = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
 		await prisma.accountBudget.update({ where: { userId }, data: { fiveHourLimitMicros: before.fiveHourUsedMicros } });
@@ -679,8 +690,9 @@ async function main() {
 				await flush();
 				const estimate = await usageRow(fallback);
 				const reservation = await prisma.budgetReservation.findUniqueOrThrow({ where: { requestId: estimate.requestId } });
-				assert.deepEqual([estimate.accounting, estimate.costBasis, estimate.costMicros, estimate.streamError, estimate.region],
-					['estimated', 'reservation', reservation.reservedMicros, 'missing_done', 'stream-host']);
+				// Without a lookup the answer is charged for its prompt, far below the 64K-output reservation.
+				assert.deepEqual([estimate.accounting, estimate.costBasis, estimate.costMicros === reservation.costMicros, estimate.costMicros < reservation.reservedMicros / 10, estimate.streamError, estimate.region],
+					['estimated', 'prompt_estimate', true, true, 'missing_done', 'stream-host']);
 			}
 			await send('normal');
 			await flush();

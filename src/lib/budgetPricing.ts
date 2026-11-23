@@ -109,7 +109,9 @@ export async function budgetPrice(body: BudgetBody, source: string, model: strin
 	const cacheReadPerMillion = routerReadRate ?? input * (cache?.readMultiplier ?? 1);
 	const cacheWritePerMillion = Math.max(routerWriteRate, input * (cache?.writeMultiplier ?? 1));
 	return { input, output, cacheReadPerMillion, cacheWritePerMillion,
-		reservedMicros: costMicros(reservedInputTokens, body.max_tokens || 4096, Math.max(input, cacheWritePerMillion, routerWriteRate), output) };
+		reservedMicros: costMicros(reservedInputTokens, body.max_tokens || 4096, Math.max(input, cacheWritePerMillion, routerWriteRate), output),
+		// Charged when an answer ends without usage: the prompt was sent, the output limit was never generated.
+		promptMicros: costMicros(reservedInputTokens, 0, input, output) };
 }
 
 /** The context OpenRouter publishes for a model, or undefined when the catalog has none. */

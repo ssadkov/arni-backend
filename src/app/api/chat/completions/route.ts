@@ -30,6 +30,7 @@ import { usageCostMicros } from '@/lib/budgetPolicy';
 import { modelCapabilities } from '@/lib/llm/modelCapabilities';
 import { freeRequestBody, routerCatalog, routerModel, zeroPrice } from '@/lib/llm/openRouterCatalog';
 import { requestClient } from '@/lib/requestClient';
+import { retryEmptyStream } from '@/lib/llm/emptyStreamRetry';
 
 export const maxDuration = 300;
 
@@ -65,6 +66,8 @@ export async function POST(req: NextRequest) {
   let trackedModel = 'unknown';
   let routedFrom: string | null = null;
   let budgetReservationId: string | null = null;
+  // Provider cost of the prompt alone, charged when an answer ends without usage.
+  let promptEstimateMicros: number | undefined;
   let upstreamDispatched = false;
   let requestedModel = 'unknown';
   let trackedSource: string | undefined;
@@ -234,6 +237,7 @@ export async function POST(req: NextRequest) {
       const reservation = await reserveBudget(user.id, model, provider, applyMarkup(price.reservedMicros, markupPercent), price.input, price.output,
         { requestId, requestedModel, chatId, client, markupPercent, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined });
       budgetReservationId = reservation.id;
+      promptEstimateMicros = price.promptMicros;
       if (paidDeepSeek) { body.usage = { include: true }; }
     }
     const catalogPrice = provider === 'bedrock' && forcedBedrockModel
@@ -310,6 +314,14 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // OpenRouter sometimes closes a stream before the first answer event (2026-11-23: 26 of 739
+    // DeepSeek requests ended without usage). Nothing reached the client yet, so it is asked once more.
+    if (body.stream && usageSource === 'openrouter') {
+      const held = await retryEmptyStream(response, async () => completeWithOpenRouter(await freeRequestBody(body), deepSeekKey));
+      if (held.retried) { await track(502, 'Upstream stream ended before the first answer event; requested once more', servedModel); }
+      response = held.response;
+    }
+
     await track(response.status, null, servedModel);
     // The client shows which model actually answered when a free model was replaced.
     const servedHeaders: Record<string, string> = routedFrom ? { 'X-Arni-Served-Model': servedModel, 'X-Arni-Routed-From': routedFrom } : {};
@@ -319,7 +331,7 @@ export async function POST(req: NextRequest) {
 
     const persistUsage = async (usage: ReportedUsage | null, metadata?: OpenRouterResponseMetadata, providerLookup = false) => {
       if (budgetReservationId) {
-        await settleBudget(budgetReservationId, usage, false, servedModel, { ...metadata, providerLookup });
+        await settleBudget(budgetReservationId, usage, false, servedModel, { ...metadata, providerLookup, promptEstimateMicros });
         return;
       }
       const missingUsage = !usage || (trialPick && usage.cost === undefined);
