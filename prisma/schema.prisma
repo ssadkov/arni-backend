@@ -100,7 +100,7 @@ model UsageLog {
   providerCostMicros Int?
   markupPercent    Int      @default(0)
   accounting       String? // reported, estimated, or legacy
-  costBasis        String? // provider, catalog, reservation; separate from legacy token-balance accounting
+  costBasis        String? // provider, catalog, prompt_estimate, reservation; separate from legacy token-balance accounting
   requestId        String? @unique
   requestedModel   String?
   operation        String @default("chat")

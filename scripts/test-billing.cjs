@@ -125,6 +125,17 @@ async function main() {
 		assert.deepEqual({ delta: before.balanceMicros - after.balanceMicros, steps: after.fiveHourRequests - before.fiveHourRequests,
 			status: (await prisma.budgetReservation.findUniqueOrThrow({ where: { id: estimate.id } })).status }, { delta: 10000, steps: 1, status: 'estimated' });
 	});
+	await check('an answer without usage is charged its prompt estimate, never above the reservation', async () => {
+		const before = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
+		const prompt = await reserveBudget(userId, 'test', 'bedrock', 10000, 3, 15);
+		await settleBudget(prompt.id, null, false, undefined, 700);
+		const capped = await reserveBudget(userId, 'test', 'bedrock', 10000, 3, 15);
+		await settleBudget(capped.id, null, false, undefined, 50000);
+		const after = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
+		const rows = await prisma.budgetReservation.findMany({ where: { id: { in: [prompt.id, capped.id] } } });
+		assert.deepEqual({ delta: before.balanceMicros - after.balanceMicros, rows: rows.map(row => [row.status, row.costMicros]).sort((a, b) => a[1] - b[1]) },
+			{ delta: 10700, rows: [['estimated', 700], ['estimated', 10000]] });
+	});
 	await check('5-hour, weekly, request and balance caps block before upstream', async () => {
 		const before = await prisma.accountBudget.findUniqueOrThrow({ where: { userId } });
 		await prisma.accountBudget.update({ where: { userId }, data: { fiveHourLimitMicros: before.fiveHourUsedMicros } });
@@ -175,6 +186,14 @@ async function main() {
 		send.close();
 		await monitored.completed;
 		assert.deepEqual(settled, [{ prompt_tokens: 20, completion_tokens: 10, cost: undefined }]);
+	});
+	await check('a stream that ends without [DONE] settles as incomplete', async () => {
+		const settled = [];
+		const input = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n')); controller.close(); } });
+		const monitored = usageStream(input, async (usage, complete) => { settled.push([usage, complete]); });
+		await new Response(monitored.stream).text();
+		await monitored.completed;
+		assert.deepEqual(settled, [[null, false]]);
 	});
 	await check('stream holds a split terminal marker until chat cost is recorded', async () => {
 		const encoder = new TextEncoder();

@@ -99,8 +99,11 @@ export async function reserveBudget(userId: string, model: string, source: strin
 	});
 }
 
-/** Missing usage stays charged at the reservation; only confirmed upstream rejection is refunded. */
-export async function settleBudget(id: string, usage: ReportedUsage | null, rejected = false, servedModel?: string) {
+/**
+ * Missing usage is charged at `promptEstimateMicros` (provider cost before markup) when the caller has one,
+ * otherwise at the reservation; only confirmed upstream rejection is refunded.
+ */
+export async function settleBudget(id: string, usage: ReportedUsage | null, rejected = false, servedModel?: string, promptEstimateMicros?: number) {
 	return prisma.$transaction(async tx => {
 		const initial = await tx.budgetReservation.findUniqueOrThrow({ where: { id } });
 		const wallet = initial.walletId ? await lockWallet(tx, initial.walletId) : null;
@@ -111,14 +114,18 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		const billedModel = reservation.source === 'openrouter' && reservation.model.endsWith(':free') && servedModel?.endsWith(':free')
 			? servedModel : reservation.model;
 		const percent = reservation.markupPercent || 0;
+		// An answer that ended without usage is charged for its prompt, never above the reservation.
+		const estimate = !usage && !rejected && reservation.operation !== 'image' && promptEstimateMicros !== undefined
+			? Math.min(promptEstimateMicros, percent <= 0 ? reservation.reservedMicros : Math.floor(reservation.reservedMicros * 100 / (100 + percent))) : undefined;
 		const catalog = usage ? usageCostMicros(usage, reservation.inputPerMillion, reservation.outputPerMillion,
 			reservation.cacheReadPerMillion ?? reservation.inputPerMillion, reservation.cacheWritePerMillion ?? reservation.inputPerMillion) : null;
 		// Provider cost stays unmarked. The reserve already includes the markup frozen on this row.
 		const providerActual = rejected ? 0
 			: reservation.operation === 'image' ? (reservation.unitPriceMicros ?? reservation.reservedMicros)
 			: usage?.cost !== undefined && reservation.source === 'openrouter' ? costMicros(1, 0, usage.cost * 1_000_000, 0)
-			: catalog ?? (percent <= 0 ? reservation.reservedMicros : Math.round(reservation.reservedMicros * 100 / (100 + percent)));
-		const actual = !rejected && reservation.operation !== 'image' && !usage ? reservation.reservedMicros : applyMarkup(providerActual, percent);
+			: catalog ?? estimate ?? (percent <= 0 ? reservation.reservedMicros : Math.round(reservation.reservedMicros * 100 / (100 + percent)));
+		const actual = !rejected && reservation.operation !== 'image' && !usage && estimate === undefined ? reservation.reservedMicros
+			: estimate !== undefined ? Math.min(reservation.reservedMicros, applyMarkup(estimate, percent)) : applyMarkup(providerActual, percent);
 		// Keep the wallet debit within the approved reservation even if upstream overbills.
 		const charged = wallet ? Math.min(reservation.reservedMicros, actual) : actual;
 		const refund = reservation.reservedMicros - charged;
@@ -147,7 +154,7 @@ export async function settleBudget(id: string, usage: ReportedUsage | null, reje
 		if (!rejected) {
 			await tx.usageLog.create({ data: { userId: reservation.userId, model: billedModel, source: reservation.source, client: reservation.client,
 				promptTokens: usage?.prompt_tokens || 0, completionTokens: usage?.completion_tokens || 0, costMicros: charged, providerCostMicros: providerActual, markupPercent: percent, accounting: status,
-				costBasis: !usage ? 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
+				costBasis: !usage ? estimate !== undefined ? 'prompt_estimate' : 'reservation' : reservation.source === 'openrouter' && usage.cost !== undefined ? 'provider' : 'catalog',
 				requestId: reservation.requestId, requestedModel: reservation.requestedModel, operation: reservation.operation, region: reservation.region,
 				inputPerMillion: reservation.inputPerMillion, outputPerMillion: reservation.outputPerMillion,
 				...cacheUsage, cacheReadPerMillion: reservation.cacheReadPerMillion, cacheWritePerMillion: reservation.cacheWritePerMillion, chatId: reservation.chatId,

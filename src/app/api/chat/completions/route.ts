@@ -30,6 +30,7 @@ import { usageCostMicros } from '@/lib/budgetPolicy';
 import { modelCapabilities } from '@/lib/llm/modelCapabilities';
 import { freeRequestBody, routerCatalog, routerModel, zeroPrice } from '@/lib/llm/openRouterCatalog';
 import { requestClient } from '@/lib/requestClient';
+import { retryEmptyStream } from '@/lib/llm/emptyStreamRetry';
 
 export const maxDuration = 300;
 
@@ -65,6 +66,8 @@ export async function POST(req: NextRequest) {
   let trackedModel = 'unknown';
   let routedFrom: string | null = null;
   let budgetReservationId: string | null = null;
+  // Provider cost of the prompt alone, charged when an answer ends without usage.
+  let promptEstimateMicros: number | undefined;
   let upstreamDispatched = false;
   let requestedModel = 'unknown';
   let trackedSource: string | undefined;
@@ -245,16 +248,18 @@ export async function POST(req: NextRequest) {
         { requestId, requestedModel, chatId, client, markupPercent, cacheReadPerMillion: price.cacheReadPerMillion, cacheWritePerMillion: price.cacheWritePerMillion, imageCount: images, region: provider === 'bedrock' ? modelCapabilities(trackedModel).region || process.env.AWS_REGION || 'us-east-1' : undefined },
         bonusWallet?.id);
       budgetReservationId = reservation.id;
+      promptEstimateMicros = price.promptMicros;
       // budgetPrice set a ceiling at the catalog price; DeepSeek keeps the test's routing (Wafer first) and reports its cost.
       if (paidDeepSeek) { body.provider = trialProvider(); body.usage = { include: true }; }
     }
     const catalogPrice = provider === 'bedrock' && forcedBedrockModel
       ? await prisma.bedrockModel.findUnique({ where: { id: forcedBedrockModel } }) : null;
     upstreamDispatched = true;
+    const routerKey = trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : paidDeepSeek ? paidDeepSeekKey() : undefined;
     let response = provider === 'bedrock'
       ? await completeWithBedrock(body, forcedBedrockModel, catalogPrice)
       : geminiPick ? await pickedGemini(body, geminiPick)
-      : await completeWithOpenRouter(await freeRequestBody(body), trialPick ? process.env.OPENROUTER_TRIAL_API_KEY : paidDeepSeek ? paidDeepSeekKey() : undefined);
+      : await completeWithOpenRouter(await freeRequestBody(body), routerKey);
 
     // One extra hop when OpenRouter refuses a free model. The failed attempt is logged,
     // then the next healthy free model is tried once.
@@ -321,6 +326,14 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // OpenRouter sometimes closes a stream before the first answer event (2026-11-23: 26 of 739
+    // DeepSeek requests ended without usage). Nothing reached the client yet, so it is asked once more.
+    if (body.stream && usageSource === 'openrouter') {
+      const held = await retryEmptyStream(response, async () => completeWithOpenRouter(await freeRequestBody(body), routerKey));
+      if (held.retried) { await track(502, 'Upstream stream ended before the first answer event; requested once more', servedModel); }
+      response = held.response;
+    }
+
     await track(response.status, null, servedModel);
     // The client shows which model actually answered when a free model was replaced.
     const servedHeaders: Record<string, string> = routedFrom ? { 'X-Arni-Served-Model': servedModel, 'X-Arni-Routed-From': routedFrom } : {};
@@ -328,9 +341,13 @@ export async function POST(req: NextRequest) {
     // Шаг уже зарезервирован: ответ OpenRouter принят, даже если поток оборвётся.
     reservedUserId = null;
 
-    const recordUsage = async (usage: ReportedUsage | null) => {
+    const recordUsage = async (usage: ReportedUsage | null, complete = true) => {
+      if (!complete) {
+        // The request is already logged as 200; this row records that its answer never finished.
+        await track(502, 'Upstream stream ended without [DONE]', servedModel);
+      }
       if (budgetReservationId) {
-        await settleBudget(budgetReservationId, usage, false, servedModel);
+        await settleBudget(budgetReservationId, usage, false, servedModel, promptEstimateMicros);
         return;
       }
       const missingUsage = !usage;
